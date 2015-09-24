@@ -18,6 +18,8 @@ compression is also supported for message sets.
 %package -n     python3-kafka
 Summary:        Python 3 client for Apache Kafka
 Requires:       python3-six, python3-snappy
+Obsoletes:      kafka-python
+Provides:       kafka-python
 BuildArch:      noarch
 
 %description -n python3-kafka
