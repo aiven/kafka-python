@@ -3,7 +3,6 @@ import logging
 from random import shuffle
 import socket
 import struct
-from threading import local
 
 import six
 
@@ -39,7 +38,7 @@ def collect_hosts(hosts, randomize=True):
     return result
 
 
-class KafkaConnection(local):
+class KafkaConnection(object):
     """
     A socket connection to a single Kafka broker
 
