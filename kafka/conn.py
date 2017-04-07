@@ -60,7 +60,8 @@ class KafkaConnection(object):
         verify_hostname: Whether or not to verify the server's hostname against its cert
     """
     def __init__(self, host, port, timeout=DEFAULT_SOCKET_TIMEOUT_SECONDS,
-                 ssl=False, ca=None, certfile=None, keyfile=None, verify_hostname=False):
+                 ssl=False, ca=None, certfile=None, keyfile=None, verify_hostname=False,
+                 keepalive=None):
         super(KafkaConnection, self).__init__()
         self.host = host
         self.port = port
@@ -70,6 +71,7 @@ class KafkaConnection(object):
         self.keyfile = keyfile
         self.ssl = ssl
         self.verify_hostname = verify_hostname
+        self.keepalive = keepalive
         self._sock = None
 
         self.reinit()
@@ -228,6 +230,13 @@ class KafkaConnection(object):
         except socket.error:
             log.exception('Unable to connect to Kafka broker at %s:%r', self.host, self.port)
             self._raise_connection_error()
+
+        if self.keepalive:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if isinstance(self.keepalive, dict):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, self.keepalive["idle"])
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, self.keepalive["interval"])
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, self.keepalive["count"])
 
         if self.ssl:
             # Disallow use of SSLv2 and V3 (meaning we require TLSv1.0+)

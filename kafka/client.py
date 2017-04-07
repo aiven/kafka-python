@@ -33,7 +33,8 @@ class KafkaClient(object):
                  certfile=None,
                  keyfile=None,
                  ssl=False,
-                 verify_hostname=False):
+                 verify_hostname=False,
+                 keepalive=None):
         # We need one connection to bootstrap
         self.client_id = kafka_bytestring(client_id)
         self.timeout = timeout
@@ -44,6 +45,7 @@ class KafkaClient(object):
         self.keyfile = keyfile
         self.ssl = ssl
         self.verify_hostname = verify_hostname
+        self.keepalive = keepalive
 
         # create connections only when we need them
         self.conns = {}
@@ -70,7 +72,8 @@ class KafkaClient(object):
                 certfile=self.certfile,
                 keyfile=self.keyfile,
                 ssl=self.ssl,
-                verify_hostname=self.verify_hostname
+                verify_hostname=self.verify_hostname,
+                keepalive=self.keepalive,
             )
 
         return self.conns[host_key]
