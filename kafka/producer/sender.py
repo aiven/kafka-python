@@ -204,11 +204,11 @@ class Sender(threading.Thread):
                     elif 5 <= response.API_VERSION <= 7:
                         partition, error_code, offset, ts, log_start_offset = partition_info
                     else:
-                        partition, error_code, offset, ts, log_start_offset, _, error_message = partition_info
+                        partition, error_code, offset, ts, log_start_offset, _, merged_error_message = partition_info
                     tp = TopicPartition(topic, partition)
                     error = error_message or Errors.for_code(error_code)
                     batch = batches_by_partition[tp]
-                    self._complete_batch(batch, error, offset, ts)
+                    self._complete_batch(batch, error, offset, ts, merged_error_message)
 
             if response.API_VERSION > 0:
                 self._sensors.record_throttle_time(response.throttle_time_ms, node=node_id)
@@ -218,7 +218,8 @@ class Sender(threading.Thread):
             for batch in batches:
                 self._complete_batch(batch, None, -1, None)
 
-    def _complete_batch(self, batch, error, base_offset, timestamp_ms=None, log_start_offset=None):
+    def _complete_batch(self, batch, error, base_offset, timestamp_ms=None,
+                        log_start_offset=None, merged_error_message=None):
         """Complete or retry the given batch of records.
 
         Arguments:
@@ -227,6 +228,10 @@ class Sender(threading.Thread):
             base_offset (int): The base offset assigned to the records if successful
             timestamp_ms (int, optional): The timestamp returned by the broker for this batch
             log_start_offset (int): The start offset of the log at the time this produce response was created
+<<<<<<< HEAD
+=======
+            merged_error_message (Exception): The summarising error message
+>>>>>>> Add zstd compress / decompress functionality, update unit tests and dependency file, readme and codec checks
         """
         # Standardize no-error to None
         if error is Errors.NoError:
@@ -238,7 +243,7 @@ class Sender(threading.Thread):
                         " retrying (%d attempts left). Error: %s",
                         batch.topic_partition,
                         self.config['retries'] - batch.attempts - 1,
-                        error)
+                        merged_error_message)
             self._accumulator.reenqueue(batch)
             self._sensors.record_retries(batch.topic_partition.topic, batch.record_count)
         else:
