@@ -205,9 +205,10 @@ class Sender(threading.Thread):
                     elif 5 <= response.API_VERSION <= 7:
                         partition, error_code, offset, ts, log_start_offset = partition_info
                     else:
+                        # the ignored parameter is record_error of type list[(batch_index: int, error_message: str)]
                         partition, error_code, offset, ts, log_start_offset, _, global_error = partition_info
                     tp = TopicPartition(topic, partition)
-                    error = error_message or Errors.for_code(error_code)
+                    error = Errors.for_code(error_code)
                     batch = batches_by_partition[tp]
                     self._complete_batch(batch, error, offset, ts, log_start_offset, global_error)
 
