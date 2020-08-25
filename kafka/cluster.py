@@ -86,7 +86,7 @@ class ClusterMetadata(object):
         Returns:
             set: {BrokerMetadata, ...}
         """
-        return set(self._brokers.values()) or set(self._bootstrap_brokers.values())
+        return set(self._brokers.values()).union(set(self._bootstrap_brokers.values()))
 
     def broker_metadata(self, broker_id):
         """Get BrokerMetadata

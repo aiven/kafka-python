@@ -633,10 +633,11 @@ class KafkaClient(object):
         end_select = time.time()
         if self._sensors:
             self._sensors.select_time.record((end_select - start_select) * 1000000000)
-
         for key, events in ready:
             if key.fileobj.fileno() < 0:
-                time.sleep(0.1)
+                # This will remove the connection from the list and call close on it
+                # which in turn "should" close and un-register the underlying socket
+                self.close(key.data.node_id)
 
             if key.fileobj is self._wake_r:
                 self._clear_wake_fd()
