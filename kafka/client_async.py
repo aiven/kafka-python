@@ -637,7 +637,13 @@ class KafkaClient(object):
             if key.fileobj.fileno() < 0:
                 # This will remove the connection from the list and call close on it
                 # which in turn "should" close and un-register the underlying socket
-                self.close(key.data.node_id)
+                node_id = key.data.node_id
+                self.close(node_id)
+                if self.cluster.broker_metadata(node_id) is not None:
+                    log.info("(Re)opening connection for %r", node_id)
+                    self._maybe_connect(node_id)
+                else:
+                    log.warning("Node id %r not present in cluster metadata, leaving closed", node_id)
 
             if key.fileobj is self._wake_r:
                 self._clear_wake_fd()
@@ -754,23 +760,25 @@ class KafkaClient(object):
             node_id or None if no suitable node was found
         """
         nodes = [broker.nodeId for broker in self.cluster.brokers()]
+        bootstrap_nodes = [broker.nodeId for broker in self.cluster._bootstrap_brokers.values()]
         random.shuffle(nodes)
 
         inflight = float('inf')
         found = None
-        for node_id in nodes:
-            conn = self._conns.get(node_id)
-            connected = conn is not None and conn.connected()
-            blacked_out = conn is not None and conn.blacked_out()
-            curr_inflight = len(conn.in_flight_requests) if conn is not None else 0
-            if connected and curr_inflight == 0:
-                # if we find an established connection
-                # with no in-flight requests, we can stop right away
-                return node_id
-            elif not blacked_out and curr_inflight < inflight:
-                # otherwise if this is the best we have found so far, record that
-                inflight = curr_inflight
-                found = node_id
+        for node_set in [nodes, bootstrap_nodes]:
+            for node_id in node_set:
+                conn = self._conns.get(node_id)
+                connected = conn is not None and conn.connected()
+                blacked_out = conn is not None and conn.blacked_out()
+                curr_inflight = len(conn.in_flight_requests) if conn is not None else 0
+                if connected and curr_inflight == 0:
+                    # if we find an established connection
+                    # with no in-flight requests, we can stop right away
+                    return node_id
+                elif not blacked_out and curr_inflight < inflight:
+                    # otherwise if this is the best we have found so far, record that
+                    inflight = curr_inflight
+                    found = node_id
 
         return found
 
