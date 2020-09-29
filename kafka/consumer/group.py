@@ -245,6 +245,7 @@ class KafkaConsumer(six.Iterator):
         sasl_oauth_token_provider (AbstractTokenProvider): OAuthBearer token provider
             instance. (See kafka.oauth.abstract). Default: None
         kafka_client (callable): Custom class / callable for creating KafkaClient instances
+        socks5_proxy (str): Socks5 proxy URL. Default: None
 
     Note:
         Configuration parameters are described in more detail at
@@ -308,6 +309,7 @@ class KafkaConsumer(six.Iterator):
         'sasl_oauth_token_provider': None,
         'legacy_iterator': False, # enable to revert to < 1.4.7 iterator
         'kafka_client': KafkaClient,
+        'socks5_proxy': None,
     }
     DEFAULT_SESSION_TIMEOUT_MS_0_9 = 30000
 
