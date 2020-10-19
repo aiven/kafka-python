@@ -1,4 +1,5 @@
 from __future__ import absolute_import, division
+from collections import defaultdict
 
 import collections
 import copy
@@ -37,6 +38,11 @@ if six.PY2:
 
 
 log = logging.getLogger('kafka.client')
+MAX_NS_ERRORS = 3
+
+
+class ResolutionError(Exception):
+    pass
 
 
 class KafkaClient(object):
@@ -222,7 +228,7 @@ class KafkaClient(object):
         self._wake_r.setblocking(False)
         self._wake_w.settimeout(self.config['wakeup_timeout_ms'] / 1000.0)
         self._wake_lock = threading.Lock()
-
+        self._name_failures = defaultdict(int)
         self._lock = threading.RLock()
 
         # when requests complete, they are transferred to this queue prior to
@@ -390,9 +396,17 @@ class KafkaClient(object):
 
             elif conn.connected():
                 return True
-
-            conn.connect()
-            return conn.connected()
+            try:
+                conn.connect()
+                return conn.connected()
+            except socket.gaierror as e:
+                if self._name_failures[node_id] > MAX_NS_ERRORS:
+                    self._name_failures.pop(node_id)
+                    self.close(node_id=node_id)
+                    raise
+                else:
+                    self._name_failures[node_id] += 1
+                    raise ResolutionError(f"Failed to resolve hostname for node {node_id}, retrying") from e
 
     def ready(self, node_id, metadata_priority=True):
         """Check whether a node is connected and ok to send more requests.
