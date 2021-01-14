@@ -274,7 +274,7 @@ class KafkaAdminClient(object):
         version = self._matching_api_version(MetadataRequest)
         if 1 <= version <= 6:
             request = MetadataRequest[version]()
-            future = self._send_request_to_node(self._client.least_loaded_node(), request)
+            future = self._send_request_to_least_loaded_node(request)
 
             self._wait_for_futures([future])
 
@@ -312,7 +312,7 @@ class KafkaAdminClient(object):
             raise NotImplementedError(
                 "Support for GroupCoordinatorRequest_v{} has not yet been added to KafkaAdminClient."
                 .format(version))
-        return self._send_request_to_node(self._client.least_loaded_node(), request)
+        return self._send_request_to_least_loaded_node(request)
 
     def _find_coordinator_id_process_response(self, response):
         """Process a FindCoordinatorResponse.
@@ -357,8 +357,35 @@ class KafkaAdminClient(object):
         }
         return groups_coordinators
 
-    def _send_request_to_node(self, node_id, request, wakeup=True):
+    def _send_request_to_least_loaded_node(self, request):
+        """Send a Kafka protocol message to the least loaded broker.
+
+        Returns a future that may be polled for status and results.
+
+        :param request: The message to send.
+        :return: A future object that may be polled for status and results.
+        :exception: The exception if the message could not be sent.
+        """
+        node_id = self._client.least_loaded_node()
+        while not self._client.ready(node_id):
+            # poll until the connection to broker is ready, otherwise send()
+            # will fail with NodeNotReadyError
+            self._client.poll()
+
+            # node_id is not part of the cluster anymore, choose a new broker
+            # to connect to
+            if self._client.cluster.broker_metadata(node_id) is None:
+                node_id = self._client.least_loaded_node()
+
+        return self._client.send(node_id, request)
+
+    def _send_request_to_node(self, node_id, request):
         """Send a Kafka protocol message to a specific broker.
+
+        .. note::
+
+            This function will enter in an infinite loop if `node_id` is
+            removed from the cluster.
 
         Returns a future that may be polled for status and results.
 
@@ -509,10 +536,7 @@ class KafkaAdminClient(object):
                 allow_auto_topic_creation=auto_topic_creation
             )
 
-        future = self._send_request_to_node(
-            self._client.least_loaded_node(),
-            request
-        )
+        future = self._send_request_to_least_loaded_node(request)
         self._wait_for_futures([future])
         return future.value
 
@@ -604,7 +628,7 @@ class KafkaAdminClient(object):
                     .format(version)
             )
 
-        future = self._send_request_to_node(self._client.least_loaded_node(), request)
+        future = self._send_request_to_least_loaded_node(request)
         self._wait_for_futures([future])
         response = future.value
 
@@ -695,7 +719,7 @@ class KafkaAdminClient(object):
                     .format(version)
             )
 
-        future = self._send_request_to_node(self._client.least_loaded_node(), request)
+        future = self._send_request_to_least_loaded_node(request)
         self._wait_for_futures([future])
         response = future.value
 
@@ -789,7 +813,7 @@ class KafkaAdminClient(object):
                     .format(version)
             )
 
-        future = self._send_request_to_node(self._client.least_loaded_node(), request)
+        future = self._send_request_to_least_loaded_node(request)
         self._wait_for_futures([future])
         response = future.value
 
@@ -849,8 +873,7 @@ class KafkaAdminClient(object):
                     ))
 
             if len(topic_resources) > 0:
-                futures.append(self._send_request_to_node(
-                    self._client.least_loaded_node(),
+                futures.append(self._send_request_to_least_loaded_node(
                     DescribeConfigsRequest[version](resources=topic_resources)
                 ))
 
@@ -870,8 +893,7 @@ class KafkaAdminClient(object):
                     ))
 
             if len(topic_resources) > 0:
-                futures.append(self._send_request_to_node(
-                    self._client.least_loaded_node(),
+                futures.append(self._send_request_to_least_loaded_node(
                     DescribeConfigsRequest[version](resources=topic_resources, include_synonyms=include_synonyms)
                 ))
         else:
@@ -918,7 +940,7 @@ class KafkaAdminClient(object):
         # // a single request that may be sent to any broker.
         #
         # So this is currently broken as it always sends to the least_loaded_node()
-        future = self._send_request_to_node(self._client.least_loaded_node(), request)
+        future = self._send_request_to_least_loaded_node(request)
 
         self._wait_for_futures([future])
         response = future.value
