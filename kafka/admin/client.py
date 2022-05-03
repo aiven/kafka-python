@@ -177,6 +177,7 @@ class KafkaAdminClient(object):
         'api_version_auto_timeout_ms': 2000,
         'selector': selectors.DefaultSelector,
         'sasl_mechanism': None,
+        'sasl_version':  0,
         'sasl_plain_username': None,
         'sasl_plain_password': None,
         'sasl_kerberos_service_name': 'kafka',

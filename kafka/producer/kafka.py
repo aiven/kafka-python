@@ -329,6 +329,7 @@ class KafkaProducer(object):
         'metrics_sample_window_ms': 30000,
         'selector': selectors.DefaultSelector,
         'sasl_mechanism': None,
+        'sasl_version':  0,
         'sasl_plain_username': None,
         'sasl_plain_password': None,
         'sasl_kerberos_service_name': 'kafka',

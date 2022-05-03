@@ -187,6 +187,7 @@ class KafkaClient(object):
         'selector': selectors.DefaultSelector,
         'metrics': None,
         'metric_group_prefix': '',
+        'sasl_version':  0,
         'sasl_mechanism': None,
         'sasl_plain_username': None,
         'sasl_plain_password': None,

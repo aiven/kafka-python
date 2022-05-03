@@ -301,6 +301,7 @@ class KafkaConsumer(six.Iterator):
         'selector': selectors.DefaultSelector,
         'exclude_internal_topics': True,
         'sasl_mechanism': None,
+        'sasl_version':  0,
         'sasl_plain_username': None,
         'sasl_plain_password': None,
         'sasl_kerberos_service_name': 'kafka',
