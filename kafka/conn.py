@@ -24,7 +24,12 @@ import kafka.errors as Errors
 from kafka.future import Future
 from kafka.metrics.stats import Avg, Count, Max, Rate
 from kafka.oauth.abstract import AbstractTokenProvider
-from kafka.protocol.admin import SaslHandShakeRequest, DescribeAclsRequest_v2, DescribeClientQuotasRequest
+from kafka.protocol.admin import (
+    SaslHandShakeRequest,
+    DescribeAclsRequest_v2,
+    DescribeClientQuotasRequest,
+    SaslAuthenticateRequest,
+)
 from kafka.protocol.commit import OffsetFetchRequest
 from kafka.protocol.offset import OffsetRequest
 from kafka.protocol.produce import ProduceRequest
@@ -191,6 +196,8 @@ class BrokerConnection(object):
             sasl mechanism handshake. Default: one of bootstrap servers
         sasl_oauth_token_provider (AbstractTokenProvider): OAuthBearer token provider
             instance. (See kafka.oauth.abstract). Default: None
+        sasl_version (int): optional defaults to version 0
+            Accepted values are: 0, 1
     """
 
     DEFAULT_CONFIG = {
@@ -220,6 +227,7 @@ class BrokerConnection(object):
         'metrics': None,
         'metric_group_prefix': '',
         'sasl_mechanism': None,
+        'sasl_version':  0,
         'sasl_plain_username': None,
         'sasl_plain_password': None,
         'sasl_kerberos_service_name': 'kafka',
@@ -522,7 +530,11 @@ class BrokerConnection(object):
 
         if self._sasl_auth_future is None:
             # Build a SaslHandShakeRequest message
-            request = SaslHandShakeRequest[0](self.config['sasl_mechanism'])
+            request = []
+            if self.config['sasl_version'] == 1:
+                request = SaslHandShakeRequest[1](self.config['sasl_mechanism'])
+            else:
+                request = SaslHandShakeRequest[0](self.config['sasl_mechanism'])
             future = Future()
             sasl_response = self._send(request)
             sasl_response.add_callback(self._handle_sasl_handshake_response, future)
@@ -669,8 +681,38 @@ class BrokerConnection(object):
             self.config['sasl_plain_username'], self.config['sasl_plain_password'], self.config['sasl_mechanism']
         )
 
+        def handle_sasl_authentication_response_final(f, response):
+            error_type = Errors.for_code(response.error_code)
+            if error_type is not Errors.NoError:
+                error = error_type(self)
+                self.close(error=error)
+                return f.failure(error_type(self))
+            return f.success(True)
+
+        def handle_sasl_authentication_response(f, response):
+            error_type = Errors.for_code(response.error_code)
+            if error_type is not Errors.NoError:
+                error = error_type(self)
+                self.close(error=error)
+                return f.failure(error_type(self))
+
+            scram_client.process_server_first_message(response.sasl_auth_bytes.decode('utf-8'))
+            client_final = scram_client.final_message().encode('utf-8')
+            request = SaslAuthenticateRequest[1](client_final)
+            sasl_response = self._send(request)
+            sasl_response.add_callback(handle_sasl_authentication_response_final, f)
+            sasl_response.add_errback(f.failure)
+            return f
+
         err = None
         close = False
+        if self.config['sasl_version'] == 1:
+            client_first = scram_client.first_message().encode('utf-8')
+            request = SaslAuthenticateRequest[1](client_first)
+            sasl_response = self._send(request)
+            sasl_response.add_callback(handle_sasl_authentication_response, future)
+            sasl_response.add_errback(future.failure)
+            return future # 
         with self._lock:
             if not self._can_send_recv():
                 err = Errors.NodeNotReadyError(str(self))
