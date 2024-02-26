@@ -911,8 +911,7 @@ class KafkaClient(object):
             if try_node is None:
                 self._lock.release()
                 raise Errors.NoBrokersAvailable()
-            if not self._maybe_connect(try_node):
-                raise Errors.BrokerNotAvailableError()
+            self._maybe_connect(try_node)
             conn = self._conns[try_node]
 
             # We will intentionally cause socket failures
