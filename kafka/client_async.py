@@ -912,7 +912,13 @@ class KafkaClient(object):
                 self._lock.release()
                 raise Errors.NoBrokersAvailable()
             self._maybe_connect(try_node)
-            conn = self._conns[try_node]
+            try:
+                conn = self._conns[try_node]
+            except KeyError:
+                if node_id is not None:
+                    self._lock.release()
+                    raise Errors.NodeNotReadyError()
+                continue
 
             # We will intentionally cause socket failures
             # These should not trigger metadata refresh
