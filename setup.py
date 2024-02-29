@@ -40,7 +40,7 @@ setup(
         "crc32c": ["crc32c"],
         "lz4": ["lz4"],
         "snappy": ["python-snappy"],
-        "zstd": ["python-zstandard"],
+        "zstd": ["zstandard"],
     },
     cmdclass={"test": Tox},
     packages=find_packages(exclude=['test']),
@@ -50,7 +50,10 @@ setup(
     license="Apache License 2.0",
     description="Pure Python client for Apache Kafka",
     long_description=README,
-    keywords="apache kafka",
+    keywords=[
+        "apache kafka",
+        "kafka",
+    ],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
@@ -64,6 +67,11 @@ setup(
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: Implementation :: CPython",
         "Programming Language :: Python :: Implementation :: PyPy",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ]
