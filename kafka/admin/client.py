@@ -225,7 +225,13 @@ class KafkaAdminClient(object):
         self.config['api_version'] = self._client.config['api_version']
 
         self._closed = False
-        self._refresh_controller_id()
+        try:
+            self._refresh_controller_id()
+        except Exception:
+            self._metrics.close()
+            self._client.close()  # prevent FD leak
+            self._closed = True
+            raise
         log.debug("KafkaAdminClient started.")
 
     def close(self):
