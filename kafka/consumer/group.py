@@ -1113,7 +1113,8 @@ class KafkaConsumer(six.Iterator):
             if (self.config['api_version'] >= (0, 8, 1) and
                 self.config['group_id'] is not None):
                 # first refresh commits for all assigned partitions
-                self._coordinator.refresh_committed_offsets_if_needed()
+                refresh_timeout_ms = max(0.0, 1000 * (end_time - time.time()))
+                self._coordinator.refresh_committed_offsets_if_needed(timeout_ms=refresh_timeout_ms)
 
             # Then, do any offset lookups in case some positions are not known
             update_timeout_ms = max(0.0, 1000 * (end_time - time.time()))
