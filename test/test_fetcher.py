@@ -4,6 +4,7 @@ from __future__ import absolute_import
 import pytest
 
 from collections import OrderedDict
+from unittest.mock import ANY
 import itertools
 import time
 
@@ -114,11 +115,11 @@ def test_update_fetch_positions(fetcher, topic, mocker):
     # partition needs reset, no committed offset
     fetcher._subscriptions.need_offset_reset(partition)
     fetcher._subscriptions.assignment[partition].awaiting_reset = False
-    fetcher.update_fetch_positions([partition])
-    fetcher._reset_offset.assert_called_with(partition)
+    fetcher.update_fetch_positions([partition], timeout_ms=1234)
+    fetcher._reset_offset.assert_called_with(partition, timeout_ms=ANY)
     assert fetcher._subscriptions.assignment[partition].awaiting_reset is True
     fetcher.update_fetch_positions([partition])
-    fetcher._reset_offset.assert_called_with(partition)
+    fetcher._reset_offset.assert_called_with(partition, timeout_ms=ANY)
 
     # partition needs reset, has committed offset
     fetcher._reset_offset.reset_mock()
@@ -139,7 +140,7 @@ def test__reset_offset(fetcher, mocker):
     mocked = mocker.patch.object(fetcher, '_retrieve_offsets')
 
     mocked.return_value = {tp: (1001, None)}
-    fetcher._reset_offset(tp)
+    fetcher._reset_offset(tp, timeout_ms=1234)
     assert not fetcher._subscriptions.assignment[tp].awaiting_reset
     assert fetcher._subscriptions.assignment[tp].position == 1001
 
