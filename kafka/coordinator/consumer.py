@@ -383,17 +383,17 @@ class ConsumerCoordinator(BaseCoordinator):
 
         return super(ConsumerCoordinator, self).need_rejoin()
 
-    def refresh_committed_offsets_if_needed(self):
+    def refresh_committed_offsets_if_needed(self, timeout_ms=float("inf")):
         """Fetch committed offsets for assigned partitions."""
         if self._subscription.needs_fetch_committed_offsets:
-            offsets = self.fetch_committed_offsets(self._subscription.assigned_partitions())
+            offsets = self.fetch_committed_offsets(self._subscription.assigned_partitions(), timeout_ms=timeout_ms)
             for partition, offset in six.iteritems(offsets):
                 # verify assignment is still active
                 if self._subscription.is_assigned(partition):
                     self._subscription.assignment[partition].committed = offset
             self._subscription.needs_fetch_committed_offsets = False
 
-    def fetch_committed_offsets(self, partitions):
+    def fetch_committed_offsets(self, partitions, timeout_ms=float("inf")):
         """Fetch the current committed offsets for specified partitions
 
         Arguments:
@@ -405,8 +405,9 @@ class ConsumerCoordinator(BaseCoordinator):
         if not partitions:
             return {}
 
+        end_time = time.time() + timeout_ms / 1000
         while True:
-            self.ensure_coordinator_ready()
+            self.ensure_coordinator_ready(timeout_ms=max(0.0, 1000 * (end_time - time.time())))
 
             # contact coordinator to fetch committed offsets
             future = self._send_offset_fetch_request(partitions)

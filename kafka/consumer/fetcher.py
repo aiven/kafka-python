@@ -131,17 +131,18 @@ class Fetcher(six.Iterator):
         self._clean_done_fetch_futures()
         return futures
 
-    def reset_offsets_if_needed(self, partitions):
+    def reset_offsets_if_needed(self, partitions, timeout_ms=float("inf")):
         """Lookup and set offsets for any partitions which are awaiting an
         explicit reset.
 
         Arguments:
             partitions (set of TopicPartitions): the partitions to reset
         """
+        end_time = time.time() + timeout_ms / 1000
         for tp in partitions:
             # TODO: If there are several offsets to reset, we could submit offset requests in parallel
             if self._subscriptions.is_assigned(tp) and self._subscriptions.is_offset_reset_needed(tp):
-                self._reset_offset(tp)
+                self._reset_offset(tp, timeout_ms=max(0.0, 1000 * (end_time - time.time())))
 
     def _clean_done_fetch_futures(self):
         while True:
@@ -156,7 +157,7 @@ class Fetcher(six.Iterator):
         self._clean_done_fetch_futures()
         return bool(self._fetch_futures)
 
-    def update_fetch_positions(self, partitions):
+    def update_fetch_positions(self, partitions, timeout_ms=float("inf")):
         """Update the fetch positions for the provided partitions.
 
         Arguments:
@@ -167,6 +168,7 @@ class Fetcher(six.Iterator):
                 partition and no reset policy is available
         """
         # reset the fetch position to the committed position
+        end_time = time.time() + timeout_ms / 1000
         for tp in partitions:
             if not self._subscriptions.is_assigned(tp):
                 log.warning("partition %s is not assigned - skipping offset"
@@ -178,12 +180,12 @@ class Fetcher(six.Iterator):
                 continue
 
             if self._subscriptions.is_offset_reset_needed(tp):
-                self._reset_offset(tp)
+                self._reset_offset(tp, timeout_ms=max(0.0, 1000 * (end_time - time.time())))
             elif self._subscriptions.assignment[tp].committed is None:
                 # there's no committed position, so we need to reset with the
                 # default strategy
                 self._subscriptions.need_offset_reset(tp)
-                self._reset_offset(tp)
+                self._reset_offset(tp, timeout_ms=max(0.0, 1000 * (end_time - time.time())))
             else:
                 committed = self._subscriptions.assignment[tp].committed.offset
                 log.debug("Resetting offset for partition %s to the committed"
@@ -215,7 +217,7 @@ class Fetcher(six.Iterator):
             offsets[tp] = offsets[tp][0]
         return offsets
 
-    def _reset_offset(self, partition):
+    def _reset_offset(self, partition, timeout_ms):
         """Reset offsets for the given partition using the offset reset strategy.
 
         Arguments:
@@ -234,7 +236,7 @@ class Fetcher(six.Iterator):
 
         log.debug("Resetting offset for partition %s to %s offset.",
                   partition, strategy)
-        offsets = self._retrieve_offsets({partition: timestamp})
+        offsets = self._retrieve_offsets({partition: timestamp}, timeout_ms)
 
         if partition in offsets:
             offset = offsets[partition][0]

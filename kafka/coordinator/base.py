@@ -238,13 +238,17 @@ class BaseCoordinator(object):
         else:
             return self.coordinator_id
 
-    def ensure_coordinator_ready(self):
+    def ensure_coordinator_ready(self, timeout_ms = float("inf")):
         """Block until the coordinator for this group is known
         (and we have an active connection -- java client uses unsent queue).
         """
+        end_time = time.time() + timeout_ms / 1000
         with self._client._lock, self._lock:
             while self.coordinator_unknown():
-
+                if time.time() >= end_time:
+                    raise Errors.KafkaTimeoutError(
+                        "Failed to ensure coordinator is ready in %s ms" % (timeout_ms,)
+                    )
                 # Prior to 0.8.2 there was no group coordinator
                 # so we will just pick a node at random and treat
                 # it as the "coordinator"
