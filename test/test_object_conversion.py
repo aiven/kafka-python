@@ -21,7 +21,7 @@ class TestObjectConversion:
         assert tc.get_item('myobject') == 0
         with pytest.raises(KeyError):
             tc.get_item('does-not-exist')
-        
+
     def test_with_empty_schema(self, superclass):
         class TestClass(superclass):
             API_KEY = 0
@@ -86,7 +86,7 @@ class TestObjectConversion:
                     ('subobject', Int16),
                     ('othersubobject', String('utf-8')))),
                 ('notarray', Int16))
-        
+
         tc = TestClass(
             myarray=[[10, 'hello']],
             notarray=42
@@ -185,7 +185,6 @@ def test_with_metadata_response():
         ]]
     )
     tc.encode()  # Make sure this object encodes successfully
-    
 
     obj = tc.to_object()
 
@@ -207,7 +206,7 @@ def test_with_metadata_response():
     assert len(obj['topics']) == 2
     assert obj['topics'][0]['error_code'] == 0
     assert obj['topics'][0]['topic'] == 'testtopic1'
-    assert obj['topics'][0]['is_internal'] == False
+    assert obj['topics'][0]['is_internal'] is False
     assert len(obj['topics'][0]['partitions']) == 2
     assert obj['topics'][0]['partitions'][0]['error_code'] == 0
     assert obj['topics'][0]['partitions'][0]['partition'] == 0
@@ -224,7 +223,7 @@ def test_with_metadata_response():
 
     assert obj['topics'][1]['error_code'] == 0
     assert obj['topics'][1]['topic'] == 'other-test-topic'
-    assert obj['topics'][1]['is_internal'] == True
+    assert obj['topics'][1]['is_internal'] is True
     assert len(obj['topics'][1]['partitions']) == 1
     assert obj['topics'][1]['partitions'][0]['error_code'] == 0
     assert obj['topics'][1]['partitions'][0]['partition'] == 0

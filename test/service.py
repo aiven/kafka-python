@@ -29,6 +29,11 @@ class ExternalService(object):
     def close(self):
         pass
 
+    def dump_logs(self):
+        pass
+
+    def wait_for(self, pattern, timeout=30):
+        pass
 
 class SpawnedService(threading.Thread):
     def __init__(self, args=None, env=None):
@@ -52,14 +57,14 @@ class SpawnedService(threading.Thread):
             log.debug("  {key}={value}".format(key=key, value=value))
 
     def _spawn(self):
-        if self.alive: return
-        if self.child and self.child.poll() is None: return
+        if self.alive or (self.child and self.child.poll() is None):
+            return
 
         self.child = subprocess.Popen(
             self.args,
             preexec_fn=os.setsid, # to avoid propagating signals
             env=self.env,
-            bufsize=1,
+            bufsize=0,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE)
         self.alive = self.child.poll() is None
@@ -76,6 +81,7 @@ class SpawnedService(threading.Thread):
         else:
             self.child.kill()
 
+    # via threading.Thread
     def run(self):
         self._spawn()
         while True:
@@ -113,7 +119,8 @@ class SpawnedService(threading.Thread):
         start = time.time()
         while True:
             if not self.is_alive():
-                raise RuntimeError("Child thread died already.")
+                log.error("Child thread died already.")
+                return False
 
             elapsed = time.time() - start
             if elapsed >= timeout:

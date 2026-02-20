@@ -1,14 +1,14 @@
 kafka-python
 ############
 
-.. image:: https://img.shields.io/badge/kafka-2.6%2C%202.5%2C%202.4%2C%202.3%2C%202.2%2C%202.1%2C%202.0%2C%201.1%2C%201.0%2C%200.11%2C%200.10%2C%200.9%2C%200.8-brightgreen.svg
+.. image:: https://img.shields.io/badge/kafka-4.0--0.8-brightgreen.svg
     :target: https://kafka-python.readthedocs.io/en/master/compatibility.html
 .. image:: https://img.shields.io/pypi/pyversions/kafka-python.svg
     :target: https://pypi.python.org/pypi/kafka-python
 .. image:: https://coveralls.io/repos/dpkp/kafka-python/badge.svg?branch=master&service=github
     :target: https://coveralls.io/github/dpkp/kafka-python?branch=master
-.. image:: https://travis-ci.org/dpkp/kafka-python.svg?branch=master
-    :target: https://travis-ci.org/dpkp/kafka-python
+.. image:: https://img.shields.io/github/actions/workflow/status/dpkp/kafka-python/python-package.yml
+    :target: https://github.com/dpkp/kafka-python/actions/workflows/python-package.yml
 .. image:: https://img.shields.io/badge/license-Apache%202-blue.svg
     :target: https://github.com/dpkp/kafka-python/blob/master/LICENSE
 
@@ -31,7 +31,9 @@ failures.  See `Compatibility <compatibility.html>`_ for more details.
 Please note that the master branch may contain unreleased features. For release
 documentation, please see readthedocs and/or python's inline help.
 
->>> pip install kafka-python
+.. code:: bash
+
+    pip install kafka-python
 
 
 KafkaConsumer
@@ -47,28 +49,56 @@ See `KafkaConsumer <apidoc/KafkaConsumer.html>`_ for API and configuration detai
 The consumer iterator returns ConsumerRecords, which are simple namedtuples
 that expose basic message attributes: topic, partition, offset, key, and value:
 
->>> from kafka import KafkaConsumer
->>> consumer = KafkaConsumer('my_favorite_topic')
->>> for msg in consumer:
-...     print (msg)
+.. code:: python
 
->>> # join a consumer group for dynamic partition assignment and offset commits
->>> from kafka import KafkaConsumer
->>> consumer = KafkaConsumer('my_favorite_topic', group_id='my_favorite_group')
->>> for msg in consumer:
-...     print (msg)
+    from kafka import KafkaConsumer
+    consumer = KafkaConsumer('my_favorite_topic')
+    for msg in consumer:
+        print (msg)
 
->>> # manually assign the partition list for the consumer
->>> from kafka import TopicPartition
->>> consumer = KafkaConsumer(bootstrap_servers='localhost:1234')
->>> consumer.assign([TopicPartition('foobar', 2)])
->>> msg = next(consumer)
+.. code:: python
 
->>> # Deserialize msgpack-encoded values
->>> consumer = KafkaConsumer(value_deserializer=msgpack.loads)
->>> consumer.subscribe(['msgpackfoo'])
->>> for msg in consumer:
-...     assert isinstance(msg.value, dict)
+    # join a consumer group for dynamic partition assignment and offset commits
+    from kafka import KafkaConsumer
+    consumer = KafkaConsumer('my_favorite_topic', group_id='my_favorite_group')
+    for msg in consumer:
+        print (msg)
+
+.. code:: python
+
+    # manually assign the partition list for the consumer
+    from kafka import TopicPartition
+    consumer = KafkaConsumer(bootstrap_servers='localhost:1234')
+    consumer.assign([TopicPartition('foobar', 2)])
+    msg = next(consumer)
+
+.. code:: python
+
+    # Deserialize msgpack-encoded values
+    consumer = KafkaConsumer(value_deserializer=msgpack.loads)
+    consumer.subscribe(['msgpackfoo'])
+    for msg in consumer:
+        assert isinstance(msg.value, dict)
+
+.. code-block:: python
+
+    # Access record headers. The returned value is a list of tuples
+    # with str, bytes for key and value
+    for msg in consumer:
+        print (msg.headers)
+
+.. code-block:: python
+
+    # Read only committed messages from transactional topic
+    consumer = KafkaConsumer(isolation_level='read_committed')
+    consumer.subscribe(['txn_topic'])
+    for msg in consumer:
+        print(msg)
+
+.. code-block:: python
+
+    # Get consumer metrics
+    metrics = consumer.metrics()
 
 
 KafkaProducer
@@ -78,36 +108,84 @@ KafkaProducer
 The class is intended to operate as similarly as possible to the official java
 client. See `KafkaProducer <apidoc/KafkaProducer.html>`_ for more details.
 
->>> from kafka import KafkaProducer
->>> producer = KafkaProducer(bootstrap_servers='localhost:1234')
->>> for _ in range(100):
-...     producer.send('foobar', b'some_message_bytes')
+.. code:: python
 
->>> # Block until a single message is sent (or timeout)
->>> future = producer.send('foobar', b'another_message')
->>> result = future.get(timeout=60)
+    from kafka import KafkaProducer
+    producer = KafkaProducer(bootstrap_servers='localhost:1234')
+    for _ in range(100):
+        producer.send('foobar', b'some_message_bytes')
 
->>> # Block until all pending messages are at least put on the network
->>> # NOTE: This does not guarantee delivery or success! It is really
->>> # only useful if you configure internal batching using linger_ms
->>> producer.flush()
+.. code:: python
 
->>> # Use a key for hashed-partitioning
->>> producer.send('foobar', key=b'foo', value=b'bar')
+    # Block until a single message is sent (or timeout)
+    future = producer.send('foobar', b'another_message')
+    result = future.get(timeout=60)
 
->>> # Serialize json messages
->>> import json
->>> producer = KafkaProducer(value_serializer=lambda v: json.dumps(v).encode('utf-8'))
->>> producer.send('fizzbuzz', {'foo': 'bar'})
+.. code:: python
 
->>> # Serialize string keys
->>> producer = KafkaProducer(key_serializer=str.encode)
->>> producer.send('flipflap', key='ping', value=b'1234')
+    # Block until all pending messages are at least put on the network
+    # NOTE: This does not guarantee delivery or success! It is really
+    # only useful if you configure internal batching using linger_ms
+    producer.flush()
 
->>> # Compress messages
->>> producer = KafkaProducer(compression_type='gzip')
->>> for i in range(1000):
-...     producer.send('foobar', b'msg %d' % i)
+.. code:: python
+
+    # Use a key for hashed-partitioning
+    producer.send('foobar', key=b'foo', value=b'bar')
+
+.. code:: python
+
+    # Serialize json messages
+    import json
+    producer = KafkaProducer(value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+    producer.send('fizzbuzz', {'foo': 'bar'})
+
+.. code:: python
+
+    # Serialize string keys
+    producer = KafkaProducer(key_serializer=str.encode)
+    producer.send('flipflap', key='ping', value=b'1234')
+
+.. code:: python
+
+    # Compress messages
+    producer = KafkaProducer(compression_type='gzip')
+    for i in range(1000):
+        producer.send('foobar', b'msg %d' % i)
+
+.. code-block:: python
+
+    # Use transactions
+    producer = KafkaProducer(transactional_id='fizzbuzz')
+    producer.init_transactions()
+    producer.begin_transaction()
+    future = producer.send('txn_topic', value=b'yes')
+    future.get() # wait for successful produce
+    producer.commit_transaction() # commit the transaction
+
+    producer.begin_transaction()
+    future = producer.send('txn_topic', value=b'no')
+    future.get() # wait for successful produce
+    producer.abort_transaction() # abort the transaction
+
+.. code-block:: python
+
+    # Include record headers. The format is list of tuples with string key
+    # and bytes value.
+    producer.send('foobar', value=b'c29tZSB2YWx1ZQ==', headers=[('content-encoding', b'base64')])
+
+.. code-block:: python
+
+    # Get producer performance metrics
+    metrics = producer.metrics()
+
+
+Module CLI Interface
+********************
+
+kafka-python also provides simple command-line interfaces for consumer, producer, and admin clients.
+Access via ``python -m kafka.consumer``, ``python -m kafka.producer``, and ``python -m kafka.admin``.
+See `Usage <usage.html>`_ for more details.
 
 
 Thread safety

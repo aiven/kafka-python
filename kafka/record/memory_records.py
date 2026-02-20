@@ -22,7 +22,7 @@ from __future__ import division
 
 import struct
 
-from kafka.errors import CorruptRecordException
+from kafka.errors import CorruptRecordError, IllegalStateError, UnsupportedVersionError
 from kafka.record.abc import ABCRecords
 from kafka.record.legacy_records import LegacyRecordBatch, LegacyRecordBatchBuilder
 from kafka.record.default_records import DefaultRecordBatch, DefaultRecordBatchBuilder
@@ -99,7 +99,7 @@ class MemoryRecords(ABCRecords):
         if next_slice is None:
             return None
         if len(next_slice) < _min_slice:
-            raise CorruptRecordException(
+            raise CorruptRecordError(
                 "Record size is less than the minimum record overhead "
                 "({})".format(_min_slice - self.LOG_OVERHEAD))
         self._cache_next()
@@ -109,30 +109,55 @@ class MemoryRecords(ABCRecords):
         else:
             return DefaultRecordBatch(next_slice)
 
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self.has_next():
+            raise StopIteration
+        return self.next_batch()
+
+    next = __next__
+
 
 class MemoryRecordsBuilder(object):
 
     __slots__ = ("_builder", "_batch_size", "_buffer", "_next_offset", "_closed",
-                 "_bytes_written")
+                 "_magic", "_bytes_written", "_producer_id", "_producer_epoch")
 
-    def __init__(self, magic, compression_type, batch_size):
+    def __init__(self, magic, compression_type, batch_size, offset=0,
+                 transactional=False, producer_id=-1, producer_epoch=-1, base_sequence=-1):
         assert magic in [0, 1, 2], "Not supported magic"
         assert compression_type in [0, 1, 2, 3, 4], "Not valid compression type"
         if magic >= 2:
+            assert not transactional or producer_id != -1, "Cannot write transactional messages without a valid producer ID"
+            assert producer_id == -1 or producer_epoch != -1, "Invalid negative producer epoch"
+            assert producer_id == -1 or base_sequence != -1, "Invalid negative sequence number used"
+
             self._builder = DefaultRecordBatchBuilder(
                 magic=magic, compression_type=compression_type,
-                is_transactional=False, producer_id=-1, producer_epoch=-1,
-                base_sequence=-1, batch_size=batch_size)
+                is_transactional=transactional, producer_id=producer_id,
+                producer_epoch=producer_epoch, base_sequence=base_sequence,
+                batch_size=batch_size)
+            self._producer_id = producer_id
+            self._producer_epoch = producer_epoch
         else:
+            assert not transactional and producer_id == -1, "Idempotent messages are not supported for magic %s" % (magic,)
             self._builder = LegacyRecordBatchBuilder(
                 magic=magic, compression_type=compression_type,
                 batch_size=batch_size)
+            self._producer_id = None
         self._batch_size = batch_size
         self._buffer = None
 
-        self._next_offset = 0
+        self._next_offset = offset
         self._closed = False
+        self._magic = magic
         self._bytes_written = 0
+
+    def skip(self, offsets_to_skip):
+        # Exposed for testing compacted records
+        self._next_offset += offsets_to_skip
 
     def append(self, timestamp, key, value, headers=[]):
         """ Append a message to the buffer.
@@ -151,6 +176,30 @@ class MemoryRecordsBuilder(object):
         self._next_offset += 1
         return metadata
 
+    def set_producer_state(self, producer_id, producer_epoch, base_sequence, is_transactional):
+        if self._magic < 2:
+            raise UnsupportedVersionError('Producer State requires Message format v2+')
+        elif self._closed:
+            # Sequence numbers are assigned when the batch is closed while the accumulator is being drained.
+            # If the resulting ProduceRequest to the partition leader failed for a retriable error, the batch will
+            # be re queued. In this case, we should not attempt to set the state again, since changing the pid and sequence
+            # once a batch has been sent to the broker risks introducing duplicates.
+            raise IllegalStateError("Trying to set producer state of an already closed batch. This indicates a bug on the client.")
+        self._builder.set_producer_state(producer_id, producer_epoch, base_sequence, is_transactional)
+        self._producer_id = producer_id
+
+    @property
+    def producer_id(self):
+        return self._producer_id
+
+    @property
+    def producer_epoch(self):
+        return self._producer_epoch
+
+    def records(self):
+        assert self._closed
+        return MemoryRecords(self._buffer)
+
     def close(self):
         # This method may be called multiple times on the same batch
         # i.e., on retries
@@ -160,6 +209,9 @@ class MemoryRecordsBuilder(object):
         if not self._closed:
             self._bytes_written = self._builder.size()
             self._buffer = bytes(self._builder.build())
+            if self._magic == 2:
+                self._producer_id = self._builder.producer_id
+                self._producer_epoch = self._builder.producer_epoch
             self._builder = None
         self._closed = True
 

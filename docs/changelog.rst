@@ -1,6 +1,646 @@
 Changelog
 =========
 
+2.3.0 (Nov 20, 2025)
+####################
+
+CLI
+---
+* python -m cli interfaces for kafka.admin, kafka.consumer, kafka.producer (#2650)
+
+Producer
+--------
+* KIP-654: Abort transaction with pending data with TransactionAbortedError (#2662)
+* KafkaProducer: Handle UnknownProducerIdError (#2663)
+* KIP-467: Augment ProduceResponse error messaging for specific culprit records (#2661)
+* Add transactional_id to KafkaProducer Keyword Arguments docstring
+
+Consumer
+--------
+* KIP-345: Consumer group static membership (#2625)
+* KIP-207: Add ListOffsetsRequest v5 / handle OffsetNotAvailableError (#2657)
+* Fetcher: Add missing argument in debug log (#2665)
+
+AdminClient
+-----------
+* KIP-430: Return Authorized Operations in Describe Responses (#2656)
+* Add send_request() and send_requests() to KafkaAdminClient (#2649)
+
+Maintenance
+-----------
+* Remove old/unused kafka.protocol.pickle (#2653)
+* Switch protocol code to getattr/setattr from __dict__ (#2654)
+* Drop unused imports (#2651)
+
+Project Infra
+-------------
+* Bump github/codeql-action from 3 to 4 (#2678)
+* Bump actions/setup-python from 5 to 6 (#2674)
+* Bump actions/setup-java from 4 to 5 (#2673)
+* Bump actions/checkout from 4 to 5 (#2669)
+* Bump actions/checkout from 5 to 6 (#2694)
+* NixOS helpers
+
+
+2.2.18 (Nov 20, 2025)
+#####################
+
+Fixes
+-----
+* Add ProducerBatch.__lt__ for heapq (#2698)
+
+
+2.2.17 (Nov 20, 2025)
+#####################
+
+Fixes
+-----
+* Add internal poll to consumer.position() (#2696)
+* Initiate Coordinator Reconnect w/ Backoff from Heartbeat Thread (#2695)
+
+Networking
+----------
+* SOCKS5: support looking up names remotely (jschwartzenberg / #2666)
+
+Documentation
+-------------
+* Add `transactional_id` to KafkaProducer Keyword Arguments docstring
+
+
+2.2.16 (Nov 18, 2025)
+#####################
+
+Fixes
+-----
+* Fix thread not waking up when there is still data to be sent (gqmelo / #2670)
+* Ensure timeout is checked after each fetch position update in `Consumer.position()` (k61n / #2668)
+
+
+2.2.15 (July 1, 2025)
+#####################
+
+Fixes
+-----
+* Fix KafkaProducer broken method names (llk89 / #2660)
+* Fix spelling mistake in KafkaConsumer docs (Xeus-CC / #2659)
+
+
+2.2.14 (June 27, 2025)
+######################
+
+Fixes
+-----
+* python2 fixups (#2655)
+* Fix coordinator lock contention during close() (#2652)
+
+
+2.2.13 (June 20, 2025)
+######################
+
+Fixes
+-----
+* Use client.await_ready() to simplify blocking wait and add timeout to admin client (#2648)
+* Fixup import style in example.py
+
+Documentation
+-------------
+* update README kafka version badge to include 4.0
+
+
+2.2.12 (June 18, 2025)
+######################
+
+Fixes
+-----
+* Fix construction of final GSSAPI authentication message (#2647)
+* Avoid RuntimeError on mutated `_completed_fetches` deque in consumer fetcher (#2646)
+* Throw exception on invalid bucket type (#2642)
+
+
+2.2.11 (June 5, 2025)
+#####################
+
+Fixes
+-----
+* Do not ignore metadata response for single topic with error (#2640)
+* Fix decoding bug in AWS_MSK_IAM mechanism (#2639)
+* Add synchronized decorator; add lock to subscription state (#2636)
+* Update build links in documentation (#2634)
+
+
+2.2.10 (May 22, 2025)
+#####################
+
+Fixes
+-----
+* Set the current host in the SASL configs (#2633)
+* Fix sasl gssapi plugin: do not rely on `client_ctx.complete` in `auth_bytes()` (#2631)
+
+
+2.2.9 (May 21, 2025)
+####################
+
+Fixes
+-----
+* Do not reset fetch positions if offset commit fetch times out (#2629)
+
+Logging / Error Messages
+------------------------
+* More / updated debug logging for coordinator / consumer (#2630)
+
+
+2.2.8 (May 20, 2025)
+####################
+
+Fixes
+-----
+* Wait for next heartbeat in thread loop; check for connected coordinator (#2622)
+* Acquire client lock in heartbeat thread before sending requests (#2620)
+
+Logging / Error Messages
+------------------------
+* Log all SyncGroupResponse errors as info+
+* More coordinator / heartbeat logging (#2621)
+* Fix timeout seconds error message in KafkaProducer (#2627)
+* Update offset commit error handling; use RebalanceInProgressError if applicable (#2623)
+
+
+2.2.7 (May 13, 2025)
+####################
+
+Fixes
+-----
+* Minor Heartbeat updates: catch more exceptions / log configuration / raise KafkaConfigurationError (#2618)
+
+
+2.2.6 (May 8, 2025)
+###################
+
+Fixes
+-----
+* Only disable heartbeat thread once at beginning of join-group (#2617)
+
+
+2.2.5 (May 8, 2025)
+###################
+
+Fixes
+-----
+* Fix producer busy loop with no pending batches (#2616)
+* Fixup py27 fetcher test failure
+
+
+2.2.4 (May 3, 2025)
+###################
+
+Fixes
+-----
+* Do not `reset_generation` after RebalanceInProgressError; improve CommitFailed error messages (#2614)
+* Fix KafkaConsumer.poll() with zero timeout (#2613)
+* Fix Fetch._reset_offsets_async() KeyError when fetching from multiple nodes (#2612)
+
+
+2.2.3 (May 1, 2025)
+###################
+
+Fixes
+-----
+* Ignore leading SECURITY_PROTOCOL:// in bootstrap_servers (#2608)
+* Only create fetch requests for ready nodes (#2607)
+
+
+2.2.2 (Apr 30, 2025)
+####################
+
+Fixes
+-----
+* Fix lint errors
+
+
+2.2.1 (Apr 29, 2025)
+####################
+
+Fixes
+-----
+* Always try ApiVersionsRequest v0, even on broker disconnect (#2603)
+* Fix SubscriptionState AttributeError in KafkaConsumer (#2599)
+
+Documentation
+-------------
+* Add transactional examples to docs
+
+
+2.2.0 (Apr 28, 2025)
+####################
+
+KafkaProducer
+-------------
+* KIP-98: Add idempotent producer support (#2569)
+* KIP-98: Transactional Producer (#2587)
+* KIP-98: Add offsets support to transactional KafkaProducer (#2590)
+* Prefix producer logs w/ client id and transactional id (#2591)
+* KAFKA-5429: Ignore produce response if batch was previously aborted
+* KIP-91: KafkaProducer `delivery_timeout_ms`
+* Default retries -> infinite
+* Expand KafkaProducer docstring w/ idempotent and transactional notes
+* RecordAccumulator: Use helper method to get/set `_tp_locks`; get dq with lock in reenqueue()
+
+KafkaConsumer
+-------------
+* KIP-98: Add Consumer support for `READ_COMMITTED` (#2582)
+* KIP-394: handle `MEMBER_ID_REQUIRED` error w/ second join group request (#2598)
+* KAFKA-5078: Defer fetch record exception if iterator has already moved across a valid record
+* KAFKA-5075: Defer consumer fetcher exception if fetch position has already increased
+* KAFKA-4937: Batch offset fetches in the Consumer
+* KAFKA-4547: Avoid resetting paused partitions to committed offsets
+* KAFKA-6397: Consumer should not block setting positions of unavailable partitions (#2593)
+
+Potentially Breaking Changes (internal)
+---------------------------------------
+* Rename CorruptRecordException -> CorruptRecordError
+* Rename Coordinator errors to generic not group (#2585)
+* Rename `ClusterMetadata.add_group_coordinator` -> `add_coordinator` + support txn type
+* Use SaslAuthenticationFailedError in kafka.conn connection failure; Drop unused AuthenticationFailedError
+* Remove old/unused errors; reorder; KafkaTimeout -> retriable
+* Drop `log_start_offset` from producer RecordMetadata
+
+Internal
+--------
+* MemoryRecords iterator; MemoryRecordsBuilder records() helper
+* Convert `DefaultRecordsBuilder.size_in_bytes` to classmethod
+
+Fixes
+-----
+* Resolve datetime deprecation warnings (#2589)
+* Avoid self refcount in log messages; test thread close on all pythons
+* Fix client.wakeup() race from producer/sender close
+* Fix ElectionNotNeededError handling in admin client
+
+Tests
+-----
+* Move integration tests and fixtures to test/integration/; simplify unit fixtures (#2588)
+* Expand Sender test coverage (#2586)
+* py2 test fixups
+* Drop unused KafkaClient import from `test_fetcher`
+
+
+2.1.6 (May 2, 2025)
+###################
+
+Fixes
+-----
+* Only create fetch requests for ready nodes (#2607)
+
+
+2.1.5 (Apr 4, 2025)
+###################
+
+Fixes
+------
+* Fix python2.7 errors (#2578)
+
+Improvements
+------------
+* Move benchmark scripts to kafka.benchmarks module (#2584)
+* Use __slots__ for metrics (#2583)
+* Pass `metrics_enabled=False` to disable metrics (#2581)
+* Drop unused kafka.producer.buffer / SimpleBufferPool (#2580)
+* Raise UnsupportedVersionError from coordinator (#2579)
+
+
+2.1.4 (Mar 28, 2025)
+####################
+
+Fixes
+-----
+* Dont block pending FetchRequests when Metadata update requested (#2576)
+* Fix MetadataRequest for no topics (#2573)
+* Send final error byte x01 on Sasl OAuth failure (#2572)
+* Reset SASL state on disconnect (#2571)
+* Try import new Sequence before old to avoid DeprecationWarning
+
+Improvements
+------------
+* Update Makefile default to 4.0 broker; add make fixture
+* Improve connection state logging (#2574)
+
+
+2.1.3 (Mar 25, 2025)
+####################
+
+Fixes
+-----
+* Fix crash when switching to closest compatible api_version in KafkaClient (#2567)
+* Fix maximum version to send an OffsetFetchRequest in KafkaAdminClient (#2563)
+* Return empty set from consumer.partitions_for_topic when topic not found (#2556)
+
+Improvements
+------------
+* KIP-511: Use ApiVersions v4 on initial connect w/ client_software_name + version (#2558)
+* KIP-74: Manage assigned partition order in consumer (#2562)
+* KIP-70: Auto-commit offsets on consumer.unsubscribe(), defer assignment changes to rejoin  (#2560)
+* Use SubscriptionType to track topics/pattern/user assignment (#2565)
+* Add optional timeout_ms kwarg to consumer.close() (#2564)
+* Move ensure_valid_topic_name to kafka.util; use in client and producer (#2561)
+
+Testing
+-------
+* Support KRaft / 4.0 brokers in tests (#2559)
+* Test older pythons against 4.0 broker
+
+Compatibility
+-------------
+* Add python 3.13 to compatibility list
+
+
+2.1.2 (Mar 17, 2025)
+####################
+
+Fixes
+-----
+* Simplify consumer.poll send fetches logic
+* Fix crc validation in consumer / fetcher
+* Lazy `_unpack_records` in PartitionRecords to fix premature fetch offset advance in consumer.poll() (#2555)
+* Debug log fetch records return; separate offsets update log
+* Fix Fetcher retriable error handling (#2554)
+* Use six.add_metaclass for py2/py3 compatible abc (#2551)
+
+Improvements
+------------
+* Add FetchMetrics class; move topic_fetch_metrics inside aggregator
+* DefaultRecordsBatchBuilder: support empty batch
+* MemoryRecordsBuilder: support arbitrary offset, skipping offsets
+* Add record.validate_crc() for v0/v1 crc checks
+* Remove fetcher message_generator / iterator interface
+* Add size_in_bytes to ABCRecordBatch and implement for Legacy and Default
+* Add magic property to ABCRecord and implement for LegacyRecord
+
+
+2.1.1 (Mar 16, 2025)
+####################
+
+Fixes
+-----
+* Fix packaging of 2.1.0 in Fedora: testing requires "pytest-timeout". (#2550)
+* Improve connection error handling when try_api_versions_check fails all attempts (#2548)
+* Add lock synchronization to Future success/failure (#2549)
+* Fix StickyPartitionAssignor encode
+
+
+2.1.0 (Mar 15, 2025)
+####################
+
+Support Kafka Broker 2.1 API Baseline
+-------------------------------------
+* Add baseline leader_epoch support for ListOffsets v4 / FetchRequest v10 (#2511)
+* Support OffsetFetch v5 / OffsetCommit v6 (2.1 baseline) (#2505)
+* Support 2.1 baseline consumer group apis (#2503)
+* Support FindCoordinatorRequest v2 in consumer and admin client (#2502)
+* Support ListOffsets v3 in consumer (#2501)
+* Support Fetch Request/Response v6 in consumer (#2500)
+* Add support for Metadata Request/Response v7 (#2497)
+* Implement Incremental Fetch Sessions / KIP-227 (#2508)
+* Implement client-side connection throttling / KIP-219 (#2510)
+* Add KafkaClient.api_version(operation) for best available from api_versions (#2495)
+
+Consumer
+--------
+* Timeout coordinator poll / ensure_coordinator_ready / ensure_active_group (#2526)
+* Add optional timeout_ms kwarg to remaining consumer/coordinator methods (#2544)
+* Check for coordinator.poll failure in KafkaConsumer
+* Only mark coordinator dead if connection_delay > 0 (#2530)
+* Delay group coordinator until after bootstrap (#2539)
+* KAFKA-4160: Ensure rebalance listener not called with coordinator lock (#1438)
+* Call default_offset_commit_callback after `_maybe_auto_commit_offsets_async` (#2546)
+* Remove legacy/v1 consumer message iterator (#2543)
+* Log warning when attempting to list offsets for unknown topic/partition (#2540)
+* Add heartbeat thread id to debug logs on start
+* Add inner_timeout_ms handler to fetcher; add fallback (#2529)
+
+Producer
+--------
+* KafkaProducer: Flush pending records before close() (#2537)
+* Raise immediate error on producer.send after close (#2542)
+* Limit producer close timeout to 1sec in __del__; use context managers to close in test_producer
+* Use NullLogger in producer atexit cleanup
+* Attempt to fix metadata race condition when partitioning in producer.send (#2523)
+* Remove unused partial KIP-467 implementation (ProduceResponse batch error details) (#2524)
+
+AdminClient
+-----------
+* Implement perform leader election (#2536)
+* Support delete_records (#2535)
+
+Networking
+----------
+* Call ApiVersionsRequest during connection, prior to Sasl Handshake (#2493)
+* Fake api_versions for old brokers, rename to ApiVersionsRequest, and handle error decoding (#2494)
+* Debug log when skipping api_versions request with pre-configured api_version
+* Only refresh metadata if connection fails all dns records (#2532)
+* Support connections through SOCKS5 proxies (#2531)
+* Fix OverflowError when connection_max_idle_ms is 0 or inf (#2538)
+* socket.setblocking for eventlet/gevent compatibility
+* Support custom per-request timeouts (#2498)
+* Include request_timeout_ms in request debug log
+* Support client.poll with future and timeout_ms
+* mask unused afi var
+* Debug log if check_version connection attempt fails
+
+SASL Modules
+------------
+* Refactor Sasl authentication with SaslMechanism abstract base class; support SaslAuthenticate (#2515)
+* Add SSPI (Kerberos for Windows) authentication mechanism (#2521)
+* Support AWS_MSK_IAM authentication (#2519)
+* Cleanup sasl mechanism configuration checks; fix gssapi bugs; add sasl_kerberos_name config (#2520)
+* Move kafka.oauth.AbstractTokenProvider -> kafka.sasl.oauth.AbstractTokenProvider (#2525)
+
+Testing
+-------
+* Bump default python to 3.13 in CI tests (#2541)
+* Update pytest log_format: use logger instead of filename; add thread id
+* Improve test_consumer_group::test_group logging before group stabilized (#2534)
+* Limit test duration to 5mins w/ pytest-timeout
+* Fix external kafka/zk fixtures for testing (#2533)
+* Disable zookeeper admin server to avoid port conflicts
+* Set default pytest log level to debug
+* test_group: shorter timeout, more logging, more sleep
+* Cache servers/dist in github actions workflow (#2527)
+* Remove tox.ini; update testing docs
+* Use thread-specific client_id in test_group
+* Fix subprocess log warning; specify timeout_ms kwarg in consumer.poll tests
+* Only set KAFKA_JVM_PERFORMANCE_OPTS in makefile if unset; add note re: 2.0-2.3 broker testing
+* Add kafka command to test.fixtures; raise FileNotFoundError if version not installed
+
+Documentation
+-------------
+* Improve ClusterMetadata docs re: node_id/broker_id str/int types
+* Document api_version_auto_timeout_ms default; override in group tests
+
+Fixes
+-----
+* Signal close to metrics expire_loop
+* Add kafka.util timeout_ms_fn
+* fixup TopicAuthorizationFailedError construction
+* Fix lint issues via ruff check (#2522)
+* Make the "mock" dependency optional (only used in Python < 3.3). (#2518)
+
+
+2.0.6 (Mar 4, 2025)
+###################
+
+Networking
+----------
+* Improve error handling in `client._maybe_connect` (#2504)
+* Client connection / `maybe_refresh_metadata` changes (#2507)
+* Improve too-large timeout handling in client poll
+* Default `client.check_version` timeout to `api_version_auto_timeout_ms` (#2496)
+
+Fixes
+-----
+* Decode and skip transactional control records in consumer (#2499)
+* try / except in consumer coordinator `__del__`
+
+Testing
+-------
+* test_conn fixup for py2
+
+Project Maintenance
+-------------------
+* Add 2.0 branch for backports
+
+
+2.0.5 (Feb 25, 2025)
+####################
+
+Networking
+----------
+* Remove unused client bootstrap backoff code
+* 200ms timeout for client.poll in ensure_active_group and admin client
+
+Fixes
+-----
+* Admin client: check_version only if needed, use node_id kwarg for controller
+* Check for -1 controller_id in admin client
+* Only acquire coordinator lock in heartbeat thread close if not self thread
+
+Testing
+-------
+* Also sleep when waiting for consumers in test_describe_consumer_group_exists
+* Refactor sasl_integration test_client - wait for node ready; use send future
+* Add timeout to test_kafka_consumer
+* Add error str to assert_message_count checks
+* Retry on error in test fixture create_topic_via_metadata
+* Fixup variable interpolation in test fixture error
+
+Documentation
+-------------
+* Update compatibility docs
+* Include client_id in BrokerConnection __str__ output
+
+Project Maintenance
+-------------------
+* Add make targets `servers/*/api_versions` and `servers/*/messages`
+
+
+2.0.4 (Feb 21, 2025)
+####################
+
+Networking
+----------
+* Check for wakeup socket errors on read and close and reinit to reset (#2482)
+* Improve client networking backoff / retry (#2480)
+* Check for socket and unresolved futures before creating selector in conn.check_version (#2477)
+* Handle socket init errors, e.g., when IPv6 is disabled (#2476)
+
+Fixes
+-----
+* Avoid self-join in heartbeat thread close (#2488)
+
+Error Handling
+--------------
+* Always log broker errors in producer.send (#2478)
+* Retain unrecognized broker response error codes with dynamic error class (#2481)
+* Update kafka.errors with latest types (#2485)
+
+Compatibility
+-------------
+* Do not validate snappy xerial header version and compat fields (for redpanda) (#2483)
+
+Documentation
+-------------
+* Added missing docstrings in admin/client.py (#2487)
+
+Testing
+-------
+* Update kafka broker test matrix; test against 3.9.0 (#2486)
+* Add default resources for new kafka server fixtures (#2484)
+* Drop make test-local; add PYTESTS configuration var
+* Fix pytest runs when KAFKA_VERSION is not set
+
+Project Maintenance
+-------------------
+* Migrate to pyproject.toml / PEP-621
+* Remove old travis files; update compatibility tests link to gha
+
+
+2.0.3 (Feb 12, 2025)
+####################
+
+Improvements
+------------
+* Add optional compression libs to extras_require (#2123, #2387)
+* KafkaConsumer: Exit poll if consumer is closed (#2152)
+* Support configuration of custom kafka client for Admin/Consumer/Producer (#2144)
+* Core Protocol: Add support for flexible versions (#2151)
+* (Internal) Allow disabling thread wakeup in _send_request_to_node (#2335)
+* Change loglevel of cancelled errors to info (#2467)
+* Strip trailing dot off hostname for SSL validation. (#2472)
+* Log connection close(error) at ERROR level (#2473)
+* Support DescribeLogDirs admin api (#2475)
+
+Compatibility
+-------------
+* Support for python 3.12 (#2379, #2382)
+* Kafka 2.5 / 2.6 (#2162)
+* Try collections.abc imports in vendored selectors34 (#2394)
+* Catch OSError when checking for gssapi import for windows compatibility (#2407)
+* Update vendored six to 1.16.0 (#2398)
+
+Documentation
+-------------
+* Update usage.rst (#2308, #2334)
+* Fix typos (#2319, #2207, #2178)
+* Fix links to the compatibility page (#2295, #2226)
+* Cleanup install instructions for optional libs (#2139)
+* Update license_file to license_files (#2462)
+* Update some RST documentation syntax (#2463)
+* Add .readthedocs.yaml; update copyright date (#2474)
+
+Fixes
+-----
+* Use isinstance in builtin crc32 (#2329)
+* Use six.viewitems instead of six.iteritems to avoid encoding problems in StickyPartitionAssignor (#2154)
+* Fix array encoding TypeError: object of type 'dict_itemiterator' has no len() (#2167)
+* Only try to update sensors fetch lag if the unpacked list contains elements (#2158)
+* Avoid logging errors during test fixture cleanup (#2458)
+* Release coordinator lock before calling maybe_leave_group (#2460)
+* Dont raise RuntimeError for dead process in SpawnedService.wait_for() (#2461)
+* Cast the size of a MemoryRecordsBuilder object (#2438)
+* Fix DescribeConfigsResponse_v1 config_source (#2464)
+* Fix base class of DescribeClientQuotasResponse_v0 (#2465)
+* Update socketpair w/ CVE-2024-3219 fix (#2468)
+
+Testing
+-------
+* Transition CI/CD to GitHub Workflows (#2378, #2392, #2381, #2406, #2419, #2418, #2417, #2456)
+* Refactor Makefile (#2457)
+* Use assert_called_with in client_async tests (#2375)
+* Cover sticky assignor's metadata method with tests (#2161)
+* Update fixtures.py to check "127.0.0.1" for auto port assignment (#2384)
+* Use -Djava.security.manager=allow for Java 23 sasl tests (#2469)
+* Test with Java 23 (#2470)
+* Update kafka properties template; disable group rebalance delay (#2471)
+
 
 2.0.2 (Sep 29, 2020)
 ####################
@@ -1243,7 +1883,7 @@ Consumers
 * Improve FailedPayloadsError handling in KafkaConsumer (dpkp PR 398)
 * KafkaConsumer: avoid raising KeyError in task_done (dpkp PR 389)
 * MultiProcessConsumer -- support configured partitions list (dpkp PR 380)
-* Fix SimpleConsumer leadership change handling (dpkp PR 393) 
+* Fix SimpleConsumer leadership change handling (dpkp PR 393)
 * Fix SimpleConsumer connection error handling (reAsOn2010 PR 392)
 * Improve Consumer handling of 'falsy' partition values (wting PR 342)
 * Fix _offsets call error in KafkaConsumer (hellais PR 376)
@@ -1348,7 +1988,7 @@ Internals
 * Add test timers via nose-timer plugin; list 10 slowest timings by default (dpkp)
 * Move fetching last known offset logic to a stand alone function (zever - PR 177)
 * Improve KafkaConnection and add more tests (dpkp - PR 196)
-* Raise TypeError if necessary when encoding strings (mdaniel - PR 204) 
+* Raise TypeError if necessary when encoding strings (mdaniel - PR 204)
 * Use Travis-CI to publish tagged releases to pypi (tkuhlman / mumrah)
 * Use official binary tarballs for integration tests and parallelize travis tests (dpkp - PR 193)
 * Improve new-topic creation handling (wizzat - PR 174)
@@ -1362,7 +2002,7 @@ Internals
 * Fix connection error timeout and improve tests (wizzat - PR 158)
 * SimpleProducer randomization of initial round robin ordering (alexcb - PR 139)
 * Fix connection timeout in KafkaClient and KafkaConnection (maciejkula - PR 161)
-* Fix seek + commit behavior (wizzat - PR 148) 
+* Fix seek + commit behavior (wizzat - PR 148)
 
 
 0.9.0 (Mar 21, 2014)

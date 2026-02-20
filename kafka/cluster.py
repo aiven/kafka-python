@@ -3,13 +3,15 @@ from __future__ import absolute_import
 import collections
 import copy
 import logging
+import random
+import re
 import threading
 import time
 
 from kafka.vendor import six
 
 from kafka import errors as Errors
-from kafka.conn import collect_hosts
+from kafka.conn import get_ip_port_afi
 from kafka.future import Future
 from kafka.structs import BrokerMetadata, PartitionMetadata, TopicPartition
 
@@ -21,7 +23,7 @@ class ClusterMetadata(object):
     A class to manage kafka cluster metadata.
 
     This class does not perform any IO. It simply updates internal state
-    given API responses (MetadataResponse, GroupCoordinatorResponse).
+    given API responses (MetadataResponse, FindCoordinatorResponse).
 
     Keyword Arguments:
         retry_backoff_ms (int): Milliseconds to backoff when retrying on
@@ -47,7 +49,7 @@ class ClusterMetadata(object):
         self._brokers = {}  # node_id -> BrokerMetadata
         self._partitions = {}  # topic -> partition -> PartitionMetadata
         self._broker_partitions = collections.defaultdict(set)  # node_id -> {TopicPartition...}
-        self._groups = {}  # group_name -> node_id
+        self._coordinators = {}  # (coord_type, coord_key) -> node_id
         self._last_refresh_ms = 0
         self._last_successful_refresh_ms = 0
         self._need_update = True
@@ -58,6 +60,7 @@ class ClusterMetadata(object):
         self.unauthorized_topics = set()
         self.internal_topics = set()
         self.controller = None
+        self.cluster_id = None
 
         self.config = copy.copy(self.DEFAULT_CONFIG)
         for key in self.config:
@@ -92,7 +95,7 @@ class ClusterMetadata(object):
         """Get BrokerMetadata
 
         Arguments:
-            broker_id (int): node_id for a broker to check
+            broker_id (int or str): node_id for a broker to check
 
         Returns:
             BrokerMetadata or None if not found
@@ -111,6 +114,7 @@ class ClusterMetadata(object):
 
         Returns:
             set: {partition (int), ...}
+            None if topic not found.
         """
         if topic not in self._partitions:
             return None
@@ -140,11 +144,14 @@ class ClusterMetadata(object):
             return None
         return self._partitions[partition.topic][partition.partition].leader
 
+    def leader_epoch_for_partition(self, partition):
+        return self._partitions[partition.topic][partition.partition].leader_epoch
+
     def partitions_for_broker(self, broker_id):
         """Return TopicPartitions for which the broker is a leader.
 
         Arguments:
-            broker_id (int): node id for a broker
+            broker_id (int or str): node id for a broker
 
         Returns:
             set: {TopicPartition, ...}
@@ -159,10 +166,10 @@ class ClusterMetadata(object):
             group (str): name of consumer group
 
         Returns:
-            int: node_id for group coordinator
+            node_id (int or str) for group coordinator, -1 if coordinator unknown
             None if the group does not exist.
         """
-        return self._groups.get(group)
+        return self._coordinators.get(('group', group))
 
     def ttl(self):
         """Milliseconds until metadata should be refreshed"""
@@ -196,6 +203,10 @@ class ClusterMetadata(object):
             if not self._future or self._future.is_done:
                 self._future = Future()
             return self._future
+
+    @property
+    def need_update(self):
+        return self._need_update
 
     def topics(self, exclude_internal_topics=True):
         """Get set of known topics.
@@ -234,13 +245,6 @@ class ClusterMetadata(object):
 
         Returns: None
         """
-        # In the common case where we ask for a single topic and get back an
-        # error, we should fail the future
-        if len(metadata.topics) == 1 and metadata.topics[0][0] != 0:
-            error_code, topic = metadata.topics[0][:2]
-            error = Errors.for_code(error_code)(topic)
-            return self.failed_update(error)
-
         if not metadata.brokers:
             log.warning("No broker metadata found in MetadataResponse -- ignoring.")
             return self.failed_update(Errors.MetadataEmptyBrokerList(metadata))
@@ -261,6 +265,11 @@ class ClusterMetadata(object):
         else:
             _new_controller = _new_brokers.get(metadata.controller_id)
 
+        if metadata.API_VERSION < 2:
+            _new_cluster_id = None
+        else:
+            _new_cluster_id = metadata.cluster_id
+
         _new_partitions = {}
         _new_broker_partitions = collections.defaultdict(set)
         _new_unauthorized_topics = set()
@@ -270,17 +279,30 @@ class ClusterMetadata(object):
             if metadata.API_VERSION == 0:
                 error_code, topic, partitions = topic_data
                 is_internal = False
-            else:
+            elif metadata.API_VERSION <= 7:
                 error_code, topic, is_internal, partitions = topic_data
+            else:
+                error_code, topic, is_internal, partitions, _authorized_operations = topic_data
             if is_internal:
                 _new_internal_topics.add(topic)
             error_type = Errors.for_code(error_code)
             if error_type is Errors.NoError:
                 _new_partitions[topic] = {}
-                for p_error, partition, leader, replicas, isr in partitions:
+                for partition_data in partitions:
+                    leader_epoch = -1
+                    offline_replicas = []
+                    if metadata.API_VERSION >= 7:
+                        p_error, partition, leader, leader_epoch, replicas, isr, offline_replicas = partition_data
+                    elif metadata.API_VERSION >= 5:
+                        p_error, partition, leader, replicas, isr, offline_replicas = partition_data
+                    else:
+                        p_error, partition, leader, replicas, isr = partition_data
+
                     _new_partitions[topic][partition] = PartitionMetadata(
-                        topic=topic, partition=partition, leader=leader,
-                        replicas=replicas, isr=isr, error=p_error)
+                        topic=topic, partition=partition,
+                        leader=leader, leader_epoch=leader_epoch,
+                        replicas=replicas, isr=isr, offline_replicas=offline_replicas,
+                        error=p_error)
                     if leader != -1:
                         _new_broker_partitions[leader].add(
                             TopicPartition(topic, partition))
@@ -306,6 +328,7 @@ class ClusterMetadata(object):
         with self._lock:
             self._brokers = _new_brokers
             self.controller = _new_controller
+            self.cluster_id = _new_cluster_id
             self._partitions = _new_partitions
             self._broker_partitions = _new_broker_partitions
             self.unauthorized_topics = _new_unauthorized_topics
@@ -321,7 +344,15 @@ class ClusterMetadata(object):
         self._last_successful_refresh_ms = now
 
         if f:
-            f.success(self)
+            # In the common case where we ask for a single topic and get back an
+            # error, we should fail the future
+            if len(metadata.topics) == 1 and metadata.topics[0][0] != Errors.NoError.errno:
+                error_code, topic = metadata.topics[0][:2]
+                error = Errors.for_code(error_code)(topic)
+                f.failure(error)
+            else:
+                f.success(self)
+
         log.debug("Updated cluster metadata to %s", self)
 
         for listener in self._listeners:
@@ -342,24 +373,25 @@ class ClusterMetadata(object):
         """Remove a previously added listener callback"""
         self._listeners.remove(listener)
 
-    def add_group_coordinator(self, group, response):
-        """Update with metadata for a group coordinator
+    def add_coordinator(self, response, coord_type, coord_key):
+        """Update with metadata for a group or txn coordinator
 
         Arguments:
-            group (str): name of group from GroupCoordinatorRequest
-            response (GroupCoordinatorResponse): broker response
+            response (FindCoordinatorResponse): broker response
+            coord_type (str): 'group' or 'transaction'
+            coord_key (str): consumer_group or transactional_id
 
         Returns:
             string: coordinator node_id if metadata is updated, None on error
         """
-        log.debug("Updating coordinator for %s: %s", group, response)
+        log.debug("Updating coordinator for %s/%s: %s", coord_type, coord_key, response)
         error_type = Errors.for_code(response.error_code)
         if error_type is not Errors.NoError:
-            log.error("GroupCoordinatorResponse error: %s", error_type)
-            self._groups[group] = -1
+            log.error("FindCoordinatorResponse error: %s", error_type)
+            self._coordinators[(coord_type, coord_key)] = -1
             return
 
-        # Use a coordinator-specific node id so that group requests
+        # Use a coordinator-specific node id so that requests
         # get a dedicated connection
         node_id = 'coordinator-{}'.format(response.coordinator_id)
         coordinator = BrokerMetadata(
@@ -368,9 +400,9 @@ class ClusterMetadata(object):
             response.port,
             None)
 
-        log.info("Group coordinator for %s is %s", group, coordinator)
+        log.info("Coordinator for %s/%s is %s", coord_type, coord_key, coordinator)
         self._coordinator_brokers[node_id] = coordinator
-        self._groups[group] = node_id
+        self._coordinators[(coord_type, coord_key)] = node_id
         return node_id
 
     def with_partitions(self, partitions_to_add):
@@ -379,7 +411,7 @@ class ClusterMetadata(object):
         new_metadata._brokers = copy.deepcopy(self._brokers)
         new_metadata._partitions = copy.deepcopy(self._partitions)
         new_metadata._broker_partitions = copy.deepcopy(self._broker_partitions)
-        new_metadata._groups = copy.deepcopy(self._groups)
+        new_metadata._coordinators = copy.deepcopy(self._coordinators)
         new_metadata.internal_topics = copy.deepcopy(self.internal_topics)
         new_metadata.unauthorized_topics = copy.deepcopy(self.unauthorized_topics)
 
@@ -393,5 +425,26 @@ class ClusterMetadata(object):
         return new_metadata
 
     def __str__(self):
-        return 'ClusterMetadata(brokers: %d, topics: %d, groups: %d)' % \
-               (len(self._brokers), len(self._partitions), len(self._groups))
+        return 'ClusterMetadata(brokers: %d, topics: %d, coordinators: %d)' % \
+               (len(self._brokers), len(self._partitions), len(self._coordinators))
+
+
+def collect_hosts(hosts, randomize=True):
+    """
+    Collects a comma-separated set of hosts (host:port) and optionally
+    randomize the returned list.
+    """
+
+    if isinstance(hosts, six.string_types):
+        hosts = hosts.strip().split(',')
+
+    result = []
+    for host_port in hosts:
+        # ignore leading SECURITY_PROTOCOL:// to mimic java client
+        host_port = re.sub('^.*://', '', host_port)
+        host, port, afi = get_ip_port_afi(host_port)
+        result.append((host, port, afi))
+
+    if randomize:
+        random.shuffle(result)
+    return result

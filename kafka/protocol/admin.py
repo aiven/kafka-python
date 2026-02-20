@@ -1,67 +1,14 @@
 from __future__ import absolute_import
 
+# enum in stdlib as of py3.4
+try:
+    from enum import IntEnum  # pylint: disable=import-error
+except ImportError:
+    # vendored backport module
+    from kafka.vendor.enum34 import IntEnum
+
 from kafka.protocol.api import Request, Response
-from kafka.protocol.types import Array, Boolean, Bytes, Int8, Int16, Int32, Int64, Schema, String, Float64, CompactString, CompactArray, TaggedFields
-
-
-class ApiVersionResponse_v0(Response):
-    API_KEY = 18
-    API_VERSION = 0
-    SCHEMA = Schema(
-        ('error_code', Int16),
-        ('api_versions', Array(
-            ('api_key', Int16),
-            ('min_version', Int16),
-            ('max_version', Int16)))
-    )
-
-
-class ApiVersionResponse_v1(Response):
-    API_KEY = 18
-    API_VERSION = 1
-    SCHEMA = Schema(
-        ('error_code', Int16),
-        ('api_versions', Array(
-            ('api_key', Int16),
-            ('min_version', Int16),
-            ('max_version', Int16))),
-        ('throttle_time_ms', Int32)
-    )
-
-
-class ApiVersionResponse_v2(Response):
-    API_KEY = 18
-    API_VERSION = 2
-    SCHEMA = ApiVersionResponse_v1.SCHEMA
-
-
-class ApiVersionRequest_v0(Request):
-    API_KEY = 18
-    API_VERSION = 0
-    RESPONSE_TYPE = ApiVersionResponse_v0
-    SCHEMA = Schema()
-
-
-class ApiVersionRequest_v1(Request):
-    API_KEY = 18
-    API_VERSION = 1
-    RESPONSE_TYPE = ApiVersionResponse_v1
-    SCHEMA = ApiVersionRequest_v0.SCHEMA
-
-
-class ApiVersionRequest_v2(Request):
-    API_KEY = 18
-    API_VERSION = 2
-    RESPONSE_TYPE = ApiVersionResponse_v1
-    SCHEMA = ApiVersionRequest_v0.SCHEMA
-
-
-ApiVersionRequest = [
-    ApiVersionRequest_v0, ApiVersionRequest_v1, ApiVersionRequest_v2,
-]
-ApiVersionResponse = [
-    ApiVersionResponse_v0, ApiVersionResponse_v1, ApiVersionResponse_v2,
-]
+from kafka.protocol.types import Array, Boolean, Bytes, Int8, Int16, Int32, Int64, Schema, String, Float64, CompactString, CompactArray, TaggedFields, BitField
 
 
 class CreateTopicsResponse_v0(Response):
@@ -239,6 +186,38 @@ DeleteTopicsResponse = [
 ]
 
 
+class DeleteRecordsResponse_v0(Response):
+    API_KEY = 21
+    API_VERSION = 0
+    SCHEMA = Schema(
+        ('throttle_time_ms', Int32),
+        ('topics', Array(
+            ('name', String('utf-8')),
+            ('partitions', Array(
+                ('partition_index', Int32),
+                ('low_watermark', Int64),
+                ('error_code', Int16))))),
+    )
+
+
+class DeleteRecordsRequest_v0(Request):
+    API_KEY = 21
+    API_VERSION = 0
+    RESPONSE_TYPE = DeleteRecordsResponse_v0
+    SCHEMA = Schema(
+        ('topics', Array(
+            ('name', String('utf-8')),
+            ('partitions', Array(
+                ('partition_index', Int32),
+                ('offset', Int64))))),
+        ('timeout_ms', Int32)
+    )
+
+
+DeleteRecordsResponse = [DeleteRecordsResponse_v0]
+DeleteRecordsRequest = [DeleteRecordsRequest_v0]
+
+
 class ListGroupsResponse_v0(Response):
     API_KEY = 16
     API_VERSION = 0
@@ -358,8 +337,8 @@ class DescribeGroupsResponse_v3(Response):
                 ('client_id', String('utf-8')),
                 ('client_host', String('utf-8')),
                 ('member_metadata', Bytes),
-                ('member_assignment', Bytes)))),
-            ('authorized_operations', Int32))
+                ('member_assignment', Bytes))),
+            ('authorized_operations', BitField)))
     )
 
 
@@ -389,7 +368,7 @@ class DescribeGroupsRequest_v2(Request):
 class DescribeGroupsRequest_v3(Request):
     API_KEY = 15
     API_VERSION = 3
-    RESPONSE_TYPE = DescribeGroupsResponse_v2
+    RESPONSE_TYPE = DescribeGroupsResponse_v3
     SCHEMA = Schema(
         ('groups', Array(String('utf-8'))),
         ('include_authorized_operations', Boolean)
@@ -404,41 +383,6 @@ DescribeGroupsResponse = [
     DescribeGroupsResponse_v0, DescribeGroupsResponse_v1,
     DescribeGroupsResponse_v2, DescribeGroupsResponse_v3,
 ]
-
-
-class SaslHandShakeResponse_v0(Response):
-    API_KEY = 17
-    API_VERSION = 0
-    SCHEMA = Schema(
-        ('error_code', Int16),
-        ('enabled_mechanisms', Array(String('utf-8')))
-    )
-
-
-class SaslHandShakeResponse_v1(Response):
-    API_KEY = 17
-    API_VERSION = 1
-    SCHEMA = SaslHandShakeResponse_v0.SCHEMA
-
-
-class SaslHandShakeRequest_v0(Request):
-    API_KEY = 17
-    API_VERSION = 0
-    RESPONSE_TYPE = SaslHandShakeResponse_v0
-    SCHEMA = Schema(
-        ('mechanism', String('utf-8'))
-    )
-
-
-class SaslHandShakeRequest_v1(Request):
-    API_KEY = 17
-    API_VERSION = 1
-    RESPONSE_TYPE = SaslHandShakeResponse_v1
-    SCHEMA = SaslHandShakeRequest_v0.SCHEMA
-
-
-SaslHandShakeRequest = [SaslHandShakeRequest_v0, SaslHandShakeRequest_v1]
-SaslHandShakeResponse = [SaslHandShakeResponse_v0, SaslHandShakeResponse_v1]
 
 
 class DescribeAclsResponse_v0(Response):
@@ -523,8 +467,8 @@ class DescribeAclsRequest_v2(Request):
     SCHEMA = DescribeAclsRequest_v1.SCHEMA
 
 
-DescribeAclsRequest = [DescribeAclsRequest_v0, DescribeAclsRequest_v1]
-DescribeAclsResponse = [DescribeAclsResponse_v0, DescribeAclsResponse_v1]
+DescribeAclsRequest = [DescribeAclsRequest_v0, DescribeAclsRequest_v1, DescribeAclsRequest_v2]
+DescribeAclsResponse = [DescribeAclsResponse_v0, DescribeAclsResponse_v1, DescribeAclsResponse_v2]
 
 class CreateAclsResponse_v0(Response):
     API_KEY = 30
@@ -719,7 +663,7 @@ class DescribeConfigsResponse_v1(Response):
                 ('config_names', String('utf-8')),
                 ('config_value', String('utf-8')),
                 ('read_only', Boolean),
-                ('is_default', Boolean),
+                ('config_source', Int8),
                 ('is_sensitive', Boolean),
                 ('config_synonyms', Array(
                     ('config_name', String('utf-8')),
@@ -787,6 +731,47 @@ DescribeConfigsRequest = [
 DescribeConfigsResponse = [
     DescribeConfigsResponse_v0, DescribeConfigsResponse_v1,
     DescribeConfigsResponse_v2,
+]
+
+
+class DescribeLogDirsResponse_v0(Response):
+    API_KEY = 35
+    API_VERSION = 0
+    SCHEMA = Schema(
+        ('throttle_time_ms', Int32),
+        ('log_dirs', Array(
+            ('error_code', Int16),
+            ('log_dir', String('utf-8')),
+            ('topics', Array(
+                ('name', String('utf-8')),
+                ('partitions', Array(
+                    ('partition_index', Int32),
+                    ('partition_size', Int64),
+                    ('offset_lag', Int64),
+                    ('is_future_key', Boolean)
+                ))
+            ))
+        ))
+    )
+
+
+class DescribeLogDirsRequest_v0(Request):
+    API_KEY = 35
+    API_VERSION = 0
+    RESPONSE_TYPE = DescribeLogDirsResponse_v0
+    SCHEMA = Schema(
+                     ('topics', Array(
+                         ('topic', String('utf-8')),
+                         ('partitions', Int32)
+                         ))
+                 )
+
+
+DescribeLogDirsResponse = [
+    DescribeLogDirsResponse_v0,
+]
+DescribeLogDirsRequest = [
+    DescribeLogDirsRequest_v0,
 ]
 
 
@@ -925,7 +910,7 @@ DeleteGroupsResponse = [
 ]
 
 
-class DescribeClientQuotasResponse_v0(Request):
+class DescribeClientQuotasResponse_v0(Response):
     API_KEY = 48
     API_VERSION = 0
     SCHEMA = Schema(
@@ -984,6 +969,7 @@ class AlterPartitionReassignmentsResponse_v0(Response):
         )),
         ("tags", TaggedFields)
     )
+    FLEXIBLE_VERSION = True
 
 
 class AlterPartitionReassignmentsRequest_v0(Request):
@@ -1031,6 +1017,7 @@ class ListPartitionReassignmentsResponse_v0(Response):
         )),
         ("tags", TaggedFields)
     )
+    FLEXIBLE_VERSION = True
 
 
 class ListPartitionReassignmentsRequest_v0(Request):
@@ -1052,3 +1039,77 @@ class ListPartitionReassignmentsRequest_v0(Request):
 ListPartitionReassignmentsRequest = [ListPartitionReassignmentsRequest_v0]
 
 ListPartitionReassignmentsResponse = [ListPartitionReassignmentsResponse_v0]
+
+
+class ElectLeadersResponse_v0(Response):
+    API_KEY = 43
+    API_VERSION = 1
+    SCHEMA = Schema(
+        ('throttle_time_ms', Int32),
+        ('error_code', Int16),
+        ('replication_election_results', Array(
+            ('topic', String('utf-8')),
+            ('partition_result', Array(
+                ('partition_id', Int32),
+                ('error_code', Int16),
+                ('error_message', String('utf-8'))
+            ))
+        ))
+    )
+
+
+class ElectLeadersRequest_v0(Request):
+    API_KEY = 43
+    API_VERSION = 1
+    RESPONSE_TYPE = ElectLeadersResponse_v0
+    SCHEMA = Schema(
+        ('election_type', Int8),
+        ('topic_partitions', Array(
+            ('topic', String('utf-8')),
+            ('partition_ids', Array(Int32))
+        )),
+        ('timeout', Int32),
+    )
+
+
+class ElectLeadersResponse_v1(Response):
+    API_KEY = 43
+    API_VERSION = 1
+    SCHEMA = Schema(
+        ('throttle_time_ms', Int32),
+        ('error_code', Int16),
+        ('replication_election_results', Array(
+            ('topic', String('utf-8')),
+            ('partition_result', Array(
+                ('partition_id', Int32),
+                ('error_code', Int16),
+                ('error_message', String('utf-8'))
+            ))
+        ))
+    )
+
+
+class ElectLeadersRequest_v1(Request):
+    API_KEY = 43
+    API_VERSION = 1
+    RESPONSE_TYPE = ElectLeadersResponse_v1
+    SCHEMA = Schema(
+        ('election_type', Int8),
+        ('topic_partitions', Array(
+            ('topic', String('utf-8')),
+            ('partition_ids', Array(Int32))
+        )),
+        ('timeout', Int32),
+    )
+
+
+class ElectionType(IntEnum):
+    """ Leader election type
+    """
+
+    PREFERRED = 0,
+    UNCLEAN = 1
+
+
+ElectLeadersRequest = [ElectLeadersRequest_v0, ElectLeadersRequest_v1]
+ElectLeadersResponse = [ElectLeadersResponse_v0, ElectLeadersResponse_v1]

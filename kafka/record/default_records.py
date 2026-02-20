@@ -60,7 +60,7 @@ from kafka.record.abc import ABCRecord, ABCRecordBatch, ABCRecordBatchBuilder
 from kafka.record.util import (
     decode_varint, encode_varint, calc_crc32c, size_of_varint
 )
-from kafka.errors import CorruptRecordException, UnsupportedCodecError
+from kafka.errors import CorruptRecordError, UnsupportedCodecError
 from kafka.codec import (
     gzip_encode, snappy_encode, lz4_encode, zstd_encode,
     gzip_decode, snappy_decode, lz4_decode, zstd_decode
@@ -104,6 +104,9 @@ class DefaultRecordBase(object):
 
     LOG_APPEND_TIME = 1
     CREATE_TIME = 0
+    NO_PRODUCER_ID = -1
+    NO_SEQUENCE = -1
+    MAX_INT = 2147483647
 
     def _assert_has_codec(self, compression_type):
         if compression_type == self.CODEC_GZIP:
@@ -114,6 +117,8 @@ class DefaultRecordBase(object):
             checker, name = codecs.has_lz4, "lz4"
         elif compression_type == self.CODEC_ZSTD:
             checker, name = codecs.has_zstd, "zstd"
+        else:
+            raise UnsupportedCodecError("Unrecognized compression type: %s" % (compression_type,))
         if not checker():
             raise UnsupportedCodecError(
                 "Libraries for {} compression codec not found".format(name))
@@ -137,6 +142,14 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
         return self._header_data[0]
 
     @property
+    def size_in_bytes(self):
+        return self._header_data[1] + self.AFTER_LEN_OFFSET
+
+    @property
+    def leader_epoch(self):
+        return self._header_data[2]
+
+    @property
     def magic(self):
         return self._header_data[3]
 
@@ -151,6 +164,14 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
     @property
     def last_offset_delta(self):
         return self._header_data[6]
+
+    @property
+    def last_offset(self):
+        return self.base_offset + self.last_offset_delta
+
+    @property
+    def next_offset(self):
+        return self.last_offset + 1
 
     @property
     def compression_type(self):
@@ -175,6 +196,40 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
     @property
     def max_timestamp(self):
         return self._header_data[8]
+
+    @property
+    def producer_id(self):
+        return self._header_data[9]
+
+    def has_producer_id(self):
+        return self.producer_id > self.NO_PRODUCER_ID
+
+    @property
+    def producer_epoch(self):
+        return self._header_data[10]
+
+    @property
+    def base_sequence(self):
+        return self._header_data[11]
+
+    @property
+    def has_sequence(self):
+        return self._header_data[11] != -1 # NO_SEQUENCE
+
+    @property
+    def last_sequence(self):
+        if self.base_sequence == self.NO_SEQUENCE:
+            return self.NO_SEQUENCE
+        return self._increment_sequence(self.base_sequence, self.last_offset_delta)
+
+    def _increment_sequence(self, base, increment):
+        if base > (self.MAX_INT - increment):
+            return increment - (self.MAX_INT - base) - 1
+        return base + increment
+
+    @property
+    def records_count(self):
+        return self._header_data[12]
 
     def _maybe_uncompress(self):
         if not self._decompressed:
@@ -239,14 +294,14 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
 
         header_count, pos = decode_varint(buffer, pos)
         if header_count < 0:
-            raise CorruptRecordException("Found invalid number of record "
+            raise CorruptRecordError("Found invalid number of record "
                                          "headers {}".format(header_count))
         headers = []
         while header_count:
             # Header key is of type String, that can't be None
             h_key_len, pos = decode_varint(buffer, pos)
             if h_key_len < 0:
-                raise CorruptRecordException(
+                raise CorruptRecordError(
                     "Invalid negative header key size {}".format(h_key_len))
             h_key = buffer[pos: pos + h_key_len].decode("utf-8")
             pos += h_key_len
@@ -264,13 +319,17 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
 
         # validate whether we have read all header bytes in the current record
         if pos - start_pos != length:
-            raise CorruptRecordException(
+            raise CorruptRecordError(
                 "Invalid record size: expected to read {} bytes in record "
                 "payload, but instead read {}".format(length, pos - start_pos))
         self._pos = pos
 
-        return DefaultRecord(
-            offset, timestamp, self.timestamp_type, key, value, headers)
+        if self.is_control_batch:
+            return ControlRecord(
+                length, offset, timestamp, self.timestamp_type, key, value, headers)
+        else:
+            return DefaultRecord(
+                length, offset, timestamp, self.timestamp_type, key, value, headers)
 
     def __iter__(self):
         self._maybe_uncompress()
@@ -279,14 +338,14 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
     def __next__(self):
         if self._next_record_index >= self._num_records:
             if self._pos != len(self._buffer):
-                raise CorruptRecordException(
+                raise CorruptRecordError(
                     "{} unconsumed bytes after all records consumed".format(
                         len(self._buffer) - self._pos))
             raise StopIteration
         try:
             msg = self._read_msg()
         except (ValueError, IndexError) as err:
-            raise CorruptRecordException(
+            raise CorruptRecordError(
                 "Found invalid record structure: {!r}".format(err))
         else:
             self._next_record_index += 1
@@ -303,19 +362,35 @@ class DefaultRecordBatch(DefaultRecordBase, ABCRecordBatch):
         verify_crc = calc_crc32c(data_view.tobytes())
         return crc == verify_crc
 
+    def __str__(self):
+        return (
+            "DefaultRecordBatch(magic={}, base_offset={}, last_offset_delta={},"
+            " first_timestamp={}, max_timestamp={},"
+            " is_transactional={}, producer_id={}, producer_epoch={}, base_sequence={},"
+            " records_count={})".format(
+                self.magic, self.base_offset, self.last_offset_delta,
+                self.first_timestamp, self.max_timestamp,
+                self.is_transactional, self.producer_id, self.producer_epoch, self.base_sequence,
+                self.records_count))
+
 
 class DefaultRecord(ABCRecord):
 
-    __slots__ = ("_offset", "_timestamp", "_timestamp_type", "_key", "_value",
+    __slots__ = ("_size_in_bytes", "_offset", "_timestamp", "_timestamp_type", "_key", "_value",
                  "_headers")
 
-    def __init__(self, offset, timestamp, timestamp_type, key, value, headers):
+    def __init__(self, size_in_bytes, offset, timestamp, timestamp_type, key, value, headers):
+        self._size_in_bytes = size_in_bytes
         self._offset = offset
         self._timestamp = timestamp
         self._timestamp_type = timestamp_type
         self._key = key
         self._value = value
         self._headers = headers
+
+    @property
+    def size_in_bytes(self):
+        return self._size_in_bytes
 
     @property
     def offset(self):
@@ -353,12 +428,54 @@ class DefaultRecord(ABCRecord):
     def checksum(self):
         return None
 
+    def validate_crc(self):
+        return True
+
     def __repr__(self):
         return (
             "DefaultRecord(offset={!r}, timestamp={!r}, timestamp_type={!r},"
             " key={!r}, value={!r}, headers={!r})".format(
                 self._offset, self._timestamp, self._timestamp_type,
                 self._key, self._value, self._headers)
+        )
+
+
+class ControlRecord(DefaultRecord):
+    __slots__ = ("_size_in_bytes", "_offset", "_timestamp", "_timestamp_type", "_key", "_value",
+                 "_headers", "_version", "_type")
+
+    KEY_STRUCT = struct.Struct(
+        ">h"  # Current Version => Int16
+        "h"  # Type => Int16 (0 indicates an abort marker, 1 indicates a commit)
+    )
+
+    def __init__(self, size_in_bytes, offset, timestamp, timestamp_type, key, value, headers):
+        super(ControlRecord, self).__init__(size_in_bytes, offset, timestamp, timestamp_type, key, value, headers)
+        (self._version, self._type) = self.KEY_STRUCT.unpack(self._key)
+
+    # see https://kafka.apache.org/documentation/#controlbatch
+    @property
+    def version(self):
+        return self._version
+
+    @property
+    def type(self):
+        return self._type
+
+    @property
+    def abort(self):
+        return self._type == 0
+
+    @property
+    def commit(self):
+        return self._type == 1
+
+    def __repr__(self):
+        return (
+            "ControlRecord(offset={!r}, timestamp={!r}, timestamp_type={!r},"
+            " version={!r}, type={!r} <{!s}>)".format(
+                self._offset, self._timestamp, self._timestamp_type,
+                self._version, self._type, "abort" if self.abort else "commit")
         )
 
 
@@ -392,6 +509,23 @@ class DefaultRecordBatchBuilder(DefaultRecordBase, ABCRecordBatchBuilder):
         self._num_records = 0
 
         self._buffer = bytearray(self.HEADER_STRUCT.size)
+
+    def set_producer_state(self, producer_id, producer_epoch, base_sequence, is_transactional):
+        assert not is_transactional or producer_id != -1, "Cannot write transactional messages without a valid producer ID"
+        assert producer_id == -1 or producer_epoch != -1, "Invalid negative producer epoch"
+        assert producer_id == -1 or base_sequence != -1, "Invalid negative sequence number"
+        self._producer_id = producer_id
+        self._producer_epoch = producer_epoch
+        self._base_sequence = base_sequence
+        self._is_transactional = is_transactional
+
+    @property
+    def producer_id(self):
+        return self._producer_id
+
+    @property
+    def producer_epoch(self):
+        return self._producer_epoch
 
     def _get_attributes(self, include_compression_type=True):
         attrs = 0
@@ -501,8 +635,8 @@ class DefaultRecordBatchBuilder(DefaultRecordBase, ABCRecordBatchBuilder):
             0,  # CRC will be set below, as we need a filled buffer for it
             self._get_attributes(use_compression_type),
             self._last_offset,
-            self._first_timestamp,
-            self._max_timestamp,
+            self._first_timestamp or 0,
+            self._max_timestamp or 0,
             self._producer_id,
             self._producer_epoch,
             self._base_sequence,
@@ -547,14 +681,15 @@ class DefaultRecordBatchBuilder(DefaultRecordBase, ABCRecordBatchBuilder):
         """
         return len(self._buffer)
 
-    def size_in_bytes(self, offset, timestamp, key, value, headers):
-        if self._first_timestamp is not None:
-            timestamp_delta = timestamp - self._first_timestamp
-        else:
-            timestamp_delta = 0
+    @classmethod
+    def header_size_in_bytes(self):
+        return self.HEADER_STRUCT.size
+
+    @classmethod
+    def size_in_bytes(self, offset_delta, timestamp_delta, key, value, headers):
         size_of_body = (
             1 +  # Attrs
-            size_of_varint(offset) +
+            size_of_varint(offset_delta) +
             size_of_varint(timestamp_delta) +
             self.size_of(key, value, headers)
         )
@@ -596,6 +731,17 @@ class DefaultRecordBatchBuilder(DefaultRecordBase, ABCRecordBatchBuilder):
             cls.HEADER_STRUCT.size + cls.MAX_RECORD_OVERHEAD +
             cls.size_of(key, value, headers)
         )
+
+    def __str__(self):
+        return (
+            "DefaultRecordBatchBuilder(magic={}, base_offset={}, last_offset_delta={},"
+            " first_timestamp={}, max_timestamp={},"
+            " is_transactional={}, producer_id={}, producer_epoch={}, base_sequence={},"
+            " records_count={})".format(
+                self._magic, 0, self._last_offset,
+                self._first_timestamp or 0, self._max_timestamp or 0,
+                self._is_transactional, self._producer_id, self._producer_epoch, self._base_sequence,
+                self._num_records))
 
 
 class DefaultRecordMetadata(object):

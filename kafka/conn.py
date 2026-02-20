@@ -4,7 +4,7 @@ import copy
 import errno
 import io
 import logging
-from random import shuffle, uniform
+from random import uniform
 
 # selectors in stdlib as of py3.4
 try:
@@ -14,7 +14,6 @@ except ImportError:
     from kafka.vendor import selectors34 as selectors
 
 import socket
-import struct
 import threading
 import time
 
@@ -23,16 +22,20 @@ from kafka.vendor import six
 import kafka.errors as Errors
 from kafka.future import Future
 from kafka.metrics.stats import Avg, Count, Max, Rate
-from kafka.oauth.abstract import AbstractTokenProvider
-from kafka.protocol.admin import SaslHandShakeRequest, DescribeAclsRequest_v2, DescribeClientQuotasRequest
+from kafka.protocol.admin import DescribeAclsRequest, DescribeClientQuotasRequest, ListGroupsRequest
+from kafka.protocol.api_versions import ApiVersionsRequest
+from kafka.protocol.broker_api_versions import BROKER_API_VERSIONS
 from kafka.protocol.commit import OffsetFetchRequest
-from kafka.protocol.offset import OffsetRequest
-from kafka.protocol.produce import ProduceRequest
-from kafka.protocol.metadata import MetadataRequest
 from kafka.protocol.fetch import FetchRequest
+from kafka.protocol.find_coordinator import FindCoordinatorRequest
+from kafka.protocol.list_offsets import ListOffsetsRequest
+from kafka.protocol.metadata import MetadataRequest
 from kafka.protocol.parser import KafkaProtocol
-from kafka.protocol.types import Int32, Int8
-from kafka.scram import ScramClient
+from kafka.protocol.produce import ProduceRequest
+from kafka.protocol.sasl_authenticate import SaslAuthenticateRequest
+from kafka.protocol.sasl_handshake import SaslHandshakeRequest
+from kafka.protocol.types import Int32
+from kafka.sasl import get_sasl_mechanism
 from kafka.socks5_wrapper import Socks5Wrapper
 from kafka.version import __version__
 
@@ -45,10 +48,6 @@ if six.PY2:
 log = logging.getLogger(__name__)
 
 DEFAULT_KAFKA_PORT = 9092
-
-SASL_QOP_AUTH = 1
-SASL_QOP_AUTH_INT = 2
-SASL_QOP_AUTH_CONF = 4
 
 try:
     import ssl
@@ -75,15 +74,6 @@ except ImportError:
     class SSLWantWriteError(Exception):
         pass
 
-# needed for SASL_GSSAPI authentication:
-try:
-    import gssapi
-    from gssapi.raw.misc import GSSError
-except (ImportError, OSError):
-    #no gssapi available, will disable gssapi mechanism
-    gssapi = None
-    GSSError = None
-
 
 AFI_NAMES = {
     socket.AF_UNSPEC: "unspecified",
@@ -93,12 +83,13 @@ AFI_NAMES = {
 
 
 class ConnectionStates(object):
-    DISCONNECTING = '<disconnecting>'
     DISCONNECTED = '<disconnected>'
     CONNECTING = '<connecting>'
     HANDSHAKE = '<handshake>'
     CONNECTED = '<connected>'
     AUTHENTICATING = '<authenticating>'
+    API_VERSIONS_SEND = '<checking_api_versions_send>'
+    API_VERSIONS_RECV = '<checking_api_versions_recv>'
 
 
 class BrokerConnection(object):
@@ -110,6 +101,10 @@ class BrokerConnection(object):
             server-side log entries that correspond to this client. Also
             submitted to GroupCoordinator for logging with respect to
             consumer group administration. Default: 'kafka-python-{version}'
+        client_software_name (str): Sent to kafka broker for KIP-511.
+            Default: 'kafka-python'
+        client_software_version (str): Sent to kafka broker for KIP-511.
+            Default: The kafka-python version (via kafka.version).
         reconnect_backoff_ms (int): The amount of time in milliseconds to
             wait before attempting to reconnect to a given host.
             Default: 50.
@@ -121,7 +116,7 @@ class BrokerConnection(object):
             reconnection attempts will continue periodically with this fixed
             rate. To avoid connection storms, a randomization factor of 0.2
             will be applied to the backoff resulting in a random range between
-            20% below and 20% above the computed value. Default: 1000.
+            20% below and 20% above the computed value. Default: 30000.
         request_timeout_ms (int): Client request timeout in milliseconds.
             Default: 30000.
         max_in_flight_requests_per_connection (int): Requests are pipelined
@@ -166,11 +161,11 @@ class BrokerConnection(object):
             or other configuration forbids use of all the specified ciphers),
             an ssl.SSLError will be raised. See ssl.SSLContext.set_ciphers
         api_version (tuple): Specify which Kafka API version to use.
-            Accepted values are: (0, 8, 0), (0, 8, 1), (0, 8, 2), (0, 9),
-            (0, 10). Default: (0, 8, 2)
+            Must be None or >= (0, 10, 0) to enable SASL authentication.
+            Default: None
         api_version_auto_timeout_ms (int): number of milliseconds to throw a
             timeout exception from the constructor when checking the broker
-            api version. Only applies if api_version is None
+            api version. Only applies if api_version is None. Default: 2000.
         selector (selectors.BaseSelector): Provide a specific selector
             implementation to use for I/O multiplexing.
             Default: selectors.DefaultSelector
@@ -186,21 +181,26 @@ class BrokerConnection(object):
             Required if sasl_mechanism is PLAIN or one of the SCRAM mechanisms.
         sasl_plain_password (str): password for sasl PLAIN and SCRAM authentication.
             Required if sasl_mechanism is PLAIN or one of the SCRAM mechanisms.
+        sasl_kerberos_name (str or gssapi.Name): Constructed gssapi.Name for use with
+            sasl mechanism handshake. If provided, sasl_kerberos_service_name and
+            sasl_kerberos_domain name are ignored. Default: None.
         sasl_kerberos_service_name (str): Service name to include in GSSAPI
             sasl mechanism handshake. Default: 'kafka'
         sasl_kerberos_domain_name (str): kerberos domain name to use in GSSAPI
             sasl mechanism handshake. Default: one of bootstrap servers
-        sasl_oauth_token_provider (AbstractTokenProvider): OAuthBearer token provider
-            instance. (See kafka.oauth.abstract). Default: None
+        sasl_oauth_token_provider (kafka.sasl.oauth.AbstractTokenProvider): OAuthBearer
+            token provider instance. Default: None
         socks5_proxy (str): Socks5 proxy url. Default: None
     """
 
     DEFAULT_CONFIG = {
         'client_id': 'kafka-python-' + __version__,
+        'client_software_name': 'kafka-python',
+        'client_software_version': __version__,
         'node_id': 0,
         'request_timeout_ms': 30000,
         'reconnect_backoff_ms': 50,
-        'reconnect_backoff_max_ms': 1000,
+        'reconnect_backoff_max_ms': 30000,
         'max_in_flight_requests_per_connection': 5,
         'receive_buffer_bytes': None,
         'send_buffer_bytes': None,
@@ -216,7 +216,8 @@ class BrokerConnection(object):
         'ssl_crlfile': None,
         'ssl_password': None,
         'ssl_ciphers': None,
-        'api_version': (0, 8, 2),  # default to most restrictive
+        'api_version': None,
+        'api_version_auto_timeout_ms': 2000,
         'selector': selectors.DefaultSelector,
         'state_change_callback': lambda node_id, sock, conn: True,
         'metrics': None,
@@ -224,13 +225,19 @@ class BrokerConnection(object):
         'sasl_mechanism': None,
         'sasl_plain_username': None,
         'sasl_plain_password': None,
+        'sasl_kerberos_name': None,
         'sasl_kerberos_service_name': 'kafka',
         'sasl_kerberos_domain_name': None,
         'sasl_oauth_token_provider': None,
         'socks5_proxy': None,
     }
     SECURITY_PROTOCOLS = ('PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL')
-    SASL_MECHANISMS = ('PLAIN', 'GSSAPI', 'OAUTHBEARER', "SCRAM-SHA-256", "SCRAM-SHA-512")
+    VERSION_CHECKS = (
+        ((0, 9), ListGroupsRequest[0]()),
+        ((0, 8, 2), FindCoordinatorRequest[0]('kafka-python-default-group')),
+        ((0, 8, 1), OffsetFetchRequest[0]('kafka-python-default-group', [])),
+        ((0, 8, 0), MetadataRequest[0]([])),
+    )
 
     def __init__(self, host, port, afi, **configs):
         self.host = host
@@ -239,6 +246,10 @@ class BrokerConnection(object):
         self._sock_afi = afi
         self._sock_addr = None
         self._api_versions = None
+        self._api_version = None
+        self._check_version_idx = None
+        self._api_versions_idx = 4 # version of ApiVersionsRequest to try on first connect
+        self._throttle_time = None
         self._socks5_proxy = None
 
         self.config = copy.copy(self.DEFAULT_CONFIG)
@@ -263,23 +274,8 @@ class BrokerConnection(object):
         if self.config['security_protocol'] in ('SSL', 'SASL_SSL'):
             assert ssl_available, "Python wasn't built with SSL support"
 
-        if self.config['security_protocol'] in ('SASL_PLAINTEXT', 'SASL_SSL'):
-            assert self.config['sasl_mechanism'] in self.SASL_MECHANISMS, (
-                'sasl_mechanism must be in ' + ', '.join(self.SASL_MECHANISMS))
-            if self.config['sasl_mechanism'] in ('PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512'):
-                assert self.config['sasl_plain_username'] is not None, (
-                    'sasl_plain_username required for PLAIN or SCRAM sasl'
-                )
-                assert self.config['sasl_plain_password'] is not None, (
-                    'sasl_plain_password required for PLAIN or SCRAM sasl'
-                )
-            if self.config['sasl_mechanism'] == 'GSSAPI':
-                assert gssapi is not None, 'GSSAPI lib not available'
-                assert self.config['sasl_kerberos_service_name'] is not None, 'sasl_kerberos_service_name required for GSSAPI sasl'
-            if self.config['sasl_mechanism'] == 'OAUTHBEARER':
-                token_provider = self.config['sasl_oauth_token_provider']
-                assert token_provider is not None, 'sasl_oauth_token_provider required for OAUTHBEARER sasl'
-                assert callable(getattr(token_provider, "token", None)), 'sasl_oauth_token_provider must implement method #token()'
+        self._init_sasl_mechanism()
+
         # This is not a general lock / this class is not generally thread-safe yet
         # However, to avoid pushing responsibility for maintaining
         # per-connection locks to the upstream client, we will use this lock to
@@ -304,6 +300,8 @@ class BrokerConnection(object):
         self._ssl_context = None
         if self.config['ssl_context'] is not None:
             self._ssl_context = self.config['ssl_context']
+        self._api_versions_future = None
+        self._api_versions_check_timeout = self.config['api_version_auto_timeout_ms']
         self._sasl_auth_future = None
         self.last_attempt = 0
         self._gai = []
@@ -313,15 +311,24 @@ class BrokerConnection(object):
                                                     self.config['metric_group_prefix'],
                                                     self.node_id)
 
+    def _init_sasl_mechanism(self):
+        if self.config['security_protocol'] in ('SASL_PLAINTEXT', 'SASL_SSL'):
+            self._sasl_mechanism = get_sasl_mechanism(self.config['sasl_mechanism'])(host=self.host, **self.config)
+        else:
+            self._sasl_mechanism = None
+
     def _dns_lookup(self):
         self._gai = dns_lookup(self.host, self.port, self.afi)
         if not self._gai:
-            log.error('DNS lookup failed for %s:%i (%s)',
-                      self.host, self.port, self.afi)
+            log.error('%s: DNS lookup failed for %s:%i (%s)',
+                      self, self.host, self.port, self.afi)
             return False
         return True
 
     def _next_afi_sockaddr(self):
+        if self.config["socks5_proxy"] and Socks5Wrapper.use_remote_lookup(self.config["socks5_proxy"]):
+            return (socket.AF_UNSPEC, (self.host, self.port))
+
         if not self._gai:
             if not self._dns_lookup():
                 return
@@ -363,6 +370,7 @@ class BrokerConnection(object):
     def connect(self):
         """Attempt to connect and return ConnectionState"""
         if self.state is ConnectionStates.DISCONNECTED and not self.blacked_out():
+            self.state = ConnectionStates.CONNECTING
             self.last_attempt = time.time()
             next_lookup = self._next_afi_sockaddr()
             if not next_lookup:
@@ -372,18 +380,22 @@ class BrokerConnection(object):
                 log.debug('%s: creating new socket', self)
                 assert self._sock is None
                 self._sock_afi, self._sock_addr = next_lookup
-                if self.config["socks5_proxy"] is not None:
-                    self._socks5_proxy = Socks5Wrapper(self.config["socks5_proxy"], self.afi)
-                    self._sock = self._socks5_proxy.socket(self._sock_afi, socket.SOCK_STREAM)
-                else:
-                    self._sock = socket.socket(self._sock_afi, socket.SOCK_STREAM)
+                try:
+                    if self.config["socks5_proxy"] is not None:
+                        log.debug('%s: initializing Socks5 proxy at %s', self, self.config["socks5_proxy"])
+                        self._socks5_proxy = Socks5Wrapper(self.config["socks5_proxy"], self.afi)
+                        self._sock = self._socks5_proxy.socket(self._sock_afi, socket.SOCK_STREAM)
+                    else:
+                        self._sock = socket.socket(self._sock_afi, socket.SOCK_STREAM)
+                except (socket.error, OSError) as e:
+                    self.close(e)
+                    return self.state
 
             for option in self.config['socket_options']:
                 log.debug('%s: setting socket option %s', self, option)
                 self._sock.setsockopt(*option)
 
             self._sock.setblocking(False)
-            self.state = ConnectionStates.CONNECTING
             self.config['state_change_callback'](self.node_id, self._sock, self)
             log.info('%s: connecting to %s:%d [%s %s]', self, self.host,
                      self.port, self._sock_addr, AFI_NAMES[self._sock_afi])
@@ -405,28 +417,20 @@ class BrokerConnection(object):
                 log.debug('%s: established TCP connection', self)
 
                 if self.config['security_protocol'] in ('SSL', 'SASL_SSL'):
-                    log.debug('%s: initiating SSL handshake', self)
                     self.state = ConnectionStates.HANDSHAKE
+                    log.debug('%s: initiating SSL handshake', self)
                     self.config['state_change_callback'](self.node_id, self._sock, self)
                     # _wrap_ssl can alter the connection state -- disconnects on failure
                     self._wrap_ssl()
-
-                elif self.config['security_protocol'] == 'SASL_PLAINTEXT':
-                    log.debug('%s: initiating SASL authentication', self)
-                    self.state = ConnectionStates.AUTHENTICATING
-                    self.config['state_change_callback'](self.node_id, self._sock, self)
-
                 else:
-                    # security_protocol PLAINTEXT
-                    log.info('%s: Connection complete.', self)
-                    self.state = ConnectionStates.CONNECTED
-                    self._reset_reconnect_backoff()
+                    self.state = ConnectionStates.API_VERSIONS_SEND
+                    log.debug('%s: checking broker Api Versions', self)
                     self.config['state_change_callback'](self.node_id, self._sock, self)
 
             # Connection failed
             # WSAEINVAL == 10022, but errno.WSAEINVAL is not available on non-win systems
             elif ret not in (errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, 10022):
-                log.error('Connect attempt to %s returned error %s.'
+                log.error('%s: Connect attempt returned error %s.'
                           ' Disconnecting.', self, ret)
                 errstr = errno.errorcode.get(ret, 'UNKNOWN')
                 self.close(Errors.KafkaConnectionError('{} {}'.format(ret, errstr)))
@@ -439,22 +443,32 @@ class BrokerConnection(object):
         if self.state is ConnectionStates.HANDSHAKE:
             if self._try_handshake():
                 log.debug('%s: completed SSL handshake.', self)
-                if self.config['security_protocol'] == 'SASL_SSL':
-                    log.debug('%s: initiating SASL authentication', self)
-                    self.state = ConnectionStates.AUTHENTICATING
-                else:
-                    log.info('%s: Connection complete.', self)
-                    self.state = ConnectionStates.CONNECTED
-                    self._reset_reconnect_backoff()
+                self.state = ConnectionStates.API_VERSIONS_SEND
+                log.debug('%s: checking broker Api Versions', self)
                 self.config['state_change_callback'](self.node_id, self._sock, self)
+
+        if self.state in (ConnectionStates.API_VERSIONS_SEND, ConnectionStates.API_VERSIONS_RECV):
+            if self._try_api_versions_check():
+                # _try_api_versions_check has side-effects: possibly disconnected on socket errors
+                if self.state in (ConnectionStates.API_VERSIONS_SEND, ConnectionStates.API_VERSIONS_RECV):
+                    if self.config['security_protocol'] in ('SASL_PLAINTEXT', 'SASL_SSL'):
+                        self.state = ConnectionStates.AUTHENTICATING
+                        log.debug('%s: initiating SASL authentication', self)
+                        self.config['state_change_callback'](self.node_id, self._sock, self)
+                    else:
+                        # security_protocol PLAINTEXT
+                        self.state = ConnectionStates.CONNECTED
+                        log.info('%s: Connection complete.', self)
+                        self._reset_reconnect_backoff()
+                        self.config['state_change_callback'](self.node_id, self._sock, self)
 
         if self.state is ConnectionStates.AUTHENTICATING:
             assert self.config['security_protocol'] in ('SASL_PLAINTEXT', 'SASL_SSL')
             if self._try_authenticate():
                 # _try_authenticate has side-effects: possibly disconnected on socket errors
                 if self.state is ConnectionStates.AUTHENTICATING:
-                    log.info('%s: Connection complete.', self)
                     self.state = ConnectionStates.CONNECTED
+                    log.info('%s: Connection complete.', self)
                     self._reset_reconnect_backoff()
                     self.config['state_change_callback'](self.node_id, self._sock, self)
 
@@ -463,7 +477,7 @@ class BrokerConnection(object):
             # Connection timed out
             request_timeout = self.config['request_timeout_ms'] / 1000.0
             if time.time() > request_timeout + self.last_attempt:
-                log.error('Connection attempt to %s timed out', self)
+                log.error('%s: Connection attempt timed out', self)
                 self.close(Errors.KafkaConnectionError('timeout'))
                 return self.state
 
@@ -507,7 +521,7 @@ class BrokerConnection(object):
         try:
             self._sock = self._ssl_context.wrap_socket(
                 self._sock,
-                server_hostname=self.host,
+                server_hostname=self.host.rstrip("."),
                 do_handshake_on_connect=False)
         except ssl.SSLError as e:
             log.exception('%s: Failed to wrap socket in SSLContext!', self)
@@ -522,20 +536,136 @@ class BrokerConnection(object):
         except (SSLWantReadError, SSLWantWriteError):
             pass
         except (SSLZeroReturnError, ConnectionError, TimeoutError, SSLEOFError):
-            log.warning('SSL connection closed by server during handshake.')
+            log.warning('%s: SSL connection closed by server during handshake.', self)
             self.close(Errors.KafkaConnectionError('SSL connection closed by server during handshake'))
         # Other SSLErrors will be raised to user
 
         return False
 
-    def _try_authenticate(self):
-        assert self.config['api_version'] is None or self.config['api_version'] >= (0, 10)
+    def _try_api_versions_check(self):
+        if self._api_versions_future is None:
+            if self.config['api_version'] is not None:
+                self._api_version = self.config['api_version']
+                # api_version will be normalized by KafkaClient, so this should not happen
+                if self._api_version not in BROKER_API_VERSIONS:
+                    raise Errors.UnrecognizedBrokerVersion('api_version %s not found in kafka.protocol.broker_api_versions' % (self._api_version,))
+                self._api_versions = BROKER_API_VERSIONS[self._api_version]
+                log.debug('%s: Using pre-configured api_version %s for ApiVersions', self, self._api_version)
+                return True
+            elif self._check_version_idx is None:
+                version = self._api_versions_idx
+                if version >= 3:
+                    request = ApiVersionsRequest[version](
+                        client_software_name=self.config['client_software_name'],
+                        client_software_version=self.config['client_software_version'],
+                        _tagged_fields={})
+                else:
+                    request = ApiVersionsRequest[version]()
+                future = Future()
+                self._api_versions_check_timeout /= 2
+                response = self._send(request, blocking=True, request_timeout_ms=self._api_versions_check_timeout)
+                response.add_callback(self._handle_api_versions_response, future)
+                response.add_errback(self._handle_api_versions_failure, future)
+                self._api_versions_future = future
+                self.state = ConnectionStates.API_VERSIONS_RECV
+                self.config['state_change_callback'](self.node_id, self._sock, self)
+            elif self._check_version_idx < len(self.VERSION_CHECKS):
+                version, request = self.VERSION_CHECKS[self._check_version_idx]
+                future = Future()
+                self._api_versions_check_timeout /= 2
+                response = self._send(request, blocking=True, request_timeout_ms=self._api_versions_check_timeout)
+                response.add_callback(self._handle_check_version_response, future, version)
+                response.add_errback(self._handle_check_version_failure, future)
+                self._api_versions_future = future
+                self.state = ConnectionStates.API_VERSIONS_RECV
+                self.config['state_change_callback'](self.node_id, self._sock, self)
+            else:
+                self.close(Errors.KafkaConnectionError('Unable to determine broker version.'))
+                return False
 
+        for r, f in self.recv():
+            f.success(r)
+
+        # A connection error during blocking send could trigger close() which will reset the future
+        if self._api_versions_future is None:
+            return False
+        elif self._api_versions_future.failed():
+            ex = self._api_versions_future.exception
+            if not isinstance(ex, Errors.KafkaConnectionError):
+                raise ex
+        return self._api_versions_future.succeeded()
+
+    def _handle_api_versions_response(self, future, response):
+        error_type = Errors.for_code(response.error_code)
+        if error_type is not Errors.NoError:
+            future.failure(error_type())
+            if error_type is Errors.UnsupportedVersionError:
+                self._api_versions_idx -= 1
+                for api_version_data in response.api_versions:
+                    api_key, min_version, max_version = api_version_data[:3]
+                    # If broker provides a lower max_version, skip to that
+                    if api_key == response.API_KEY:
+                        self._api_versions_idx = min(self._api_versions_idx, max_version)
+                        break
+                if self._api_versions_idx >= 0:
+                    self._api_versions_future = None
+                    self.state = ConnectionStates.API_VERSIONS_SEND
+                    self.config['state_change_callback'](self.node_id, self._sock, self)
+            else:
+                self.close(error=error_type())
+            return
+        self._api_versions = dict([
+            (api_version_data[0], (api_version_data[1], api_version_data[2]))
+            for api_version_data in response.api_versions
+        ])
+        self._api_version = self._infer_broker_version_from_api_versions(self._api_versions)
+        log.info('%s: Broker version identified as %s', self, '.'.join(map(str, self._api_version)))
+        future.success(self._api_version)
+        self.connect()
+
+    def _handle_api_versions_failure(self, future, ex):
+        future.failure(ex)
+        # Modern brokers should not disconnect on unrecognized api-versions request,
+        # but in case they do we always want to try v0 as a fallback
+        # otherwise switch to check_version probe.
+        if self._api_versions_idx > 0:
+            self._api_versions_idx = 0
+        else:
+            self._check_version_idx = 0
+        # after failure connection is closed, so state should already be DISCONNECTED
+
+    def _handle_check_version_response(self, future, version, _response):
+        log.info('%s: Broker version identified as %s', self, '.'.join(map(str, version)))
+        log.info('Set configuration api_version=%s to skip auto'
+                 ' check_version requests on startup', version)
+        self._api_versions = BROKER_API_VERSIONS[version]
+        self._api_version = version
+        future.success(version)
+        self.connect()
+
+    def _handle_check_version_failure(self, future, ex):
+        future.failure(ex)
+        self._check_version_idx += 1
+        # after failure connection is closed, so state should already be DISCONNECTED
+
+    def _sasl_handshake_version(self):
+        if self._api_versions is None:
+            raise RuntimeError('_api_versions not set')
+        if SaslHandshakeRequest[0].API_KEY not in self._api_versions:
+            raise Errors.UnsupportedVersionError('SaslHandshake')
+
+        # Build a SaslHandshakeRequest message
+        min_version, max_version = self._api_versions[SaslHandshakeRequest[0].API_KEY]
+        if min_version > 1:
+            raise Errors.UnsupportedVersionError('SaslHandshake %s' % min_version)
+        return min(max_version, 1)
+
+    def _try_authenticate(self):
         if self._sasl_auth_future is None:
-            # Build a SaslHandShakeRequest message
-            request = SaslHandShakeRequest[0](self.config['sasl_mechanism'])
+            version = self._sasl_handshake_version()
+            request = SaslHandshakeRequest[version](self.config['sasl_mechanism'])
             future = Future()
-            sasl_response = self._send(request)
+            sasl_response = self._send(request, blocking=True)
             sasl_response.add_callback(self._handle_sasl_handshake_response, future)
             sasl_response.add_errback(lambda f, e: f.failure(e), future)
             self._sasl_auth_future = future
@@ -560,23 +690,18 @@ class BrokerConnection(object):
             return future.failure(error_type(self))
 
         if self.config['sasl_mechanism'] not in response.enabled_mechanisms:
-            return future.failure(
+            future.failure(
                 Errors.UnsupportedSaslMechanismError(
                     'Kafka broker does not support %s sasl mechanism. Enabled mechanisms are: %s'
                     % (self.config['sasl_mechanism'], response.enabled_mechanisms)))
-        elif self.config['sasl_mechanism'] == 'PLAIN':
-            return self._try_authenticate_plain(future)
-        elif self.config['sasl_mechanism'] == 'GSSAPI':
-            return self._try_authenticate_gssapi(future)
-        elif self.config['sasl_mechanism'] == 'OAUTHBEARER':
-            return self._try_authenticate_oauth(future)
-        elif self.config['sasl_mechanism'].startswith("SCRAM-SHA-"):
-            return self._try_authenticate_scram(future)
         else:
-            return future.failure(
-                Errors.UnsupportedSaslMechanismError(
-                    'kafka-python does not support SASL mechanism %s' %
-                    self.config['sasl_mechanism']))
+            self._sasl_authenticate(future)
+
+        assert future.is_done, 'SASL future not complete after mechanism processing!'
+        if future.failed():
+            self.close(error=future.exception)
+        else:
+            self.connect()
 
     def _send_bytes(self, data):
         """Send some data via non-blocking IO
@@ -605,6 +730,7 @@ class BrokerConnection(object):
         return total_sent
 
     def _send_bytes_blocking(self, data):
+        self._sock.setblocking(True)
         self._sock.settimeout(self.config['request_timeout_ms'] / 1000)
         total_sent = 0
         try:
@@ -616,8 +742,10 @@ class BrokerConnection(object):
             return total_sent
         finally:
             self._sock.settimeout(0.0)
+            self._sock.setblocking(False)
 
     def _recv_bytes_blocking(self, n):
+        self._sock.setblocking(True)
         self._sock.settimeout(self.config['request_timeout_ms'] / 1000)
         try:
             data = b''
@@ -629,225 +757,76 @@ class BrokerConnection(object):
             return data
         finally:
             self._sock.settimeout(0.0)
+            self._sock.setblocking(False)
 
-    def _try_authenticate_plain(self, future):
-        if self.config['security_protocol'] == 'SASL_PLAINTEXT':
-            log.warning('%s: Sending username and password in the clear', self)
-
-        data = b''
-        # Send PLAIN credentials per RFC-4616
-        msg = bytes('\0'.join([self.config['sasl_plain_username'],
-                               self.config['sasl_plain_username'],
-                               self.config['sasl_plain_password']]).encode('utf-8'))
-        size = Int32.encode(len(msg))
-
-        err = None
-        close = False
-        with self._lock:
-            if not self._can_send_recv():
-                err = Errors.NodeNotReadyError(str(self))
-                close = False
-            else:
-                try:
-                    self._send_bytes_blocking(size + msg)
-
-                    # The server will send a zero sized message (that is Int32(0)) on success.
-                    # The connection is closed on failure
-                    data = self._recv_bytes_blocking(4)
-
-                except (ConnectionError, TimeoutError) as e:
-                    log.exception("%s: Error receiving reply from server", self)
-                    err = Errors.KafkaConnectionError("%s: %s" % (self, e))
-                    close = True
-
-        if err is not None:
-            if close:
-                self.close(error=err)
-            return future.failure(err)
-
-        if data != b'\x00\x00\x00\x00':
-            error = Errors.AuthenticationFailedError('Unrecognized response during authentication')
-            return future.failure(error)
-
-        log.info('%s: Authenticated as %s via PLAIN', self, self.config['sasl_plain_username'])
-        return future.success(True)
-
-    def _try_authenticate_scram(self, future):
-        if self.config['security_protocol'] == 'SASL_PLAINTEXT':
-            log.warning('%s: Exchanging credentials in the clear', self)
-
-        scram_client = ScramClient(
-            self.config['sasl_plain_username'], self.config['sasl_plain_password'], self.config['sasl_mechanism']
-        )
-
-        err = None
-        close = False
-        with self._lock:
-            if not self._can_send_recv():
-                err = Errors.NodeNotReadyError(str(self))
-                close = False
-            else:
-                try:
-                    client_first = scram_client.first_message().encode('utf-8')
-                    size = Int32.encode(len(client_first))
-                    self._send_bytes_blocking(size + client_first)
-
-                    (data_len,) = struct.unpack('>i', self._recv_bytes_blocking(4))
-                    server_first = self._recv_bytes_blocking(data_len).decode('utf-8')
-                    scram_client.process_server_first_message(server_first)
-
-                    client_final = scram_client.final_message().encode('utf-8')
-                    size = Int32.encode(len(client_final))
-                    self._send_bytes_blocking(size + client_final)
-
-                    (data_len,) = struct.unpack('>i', self._recv_bytes_blocking(4))
-                    server_final = self._recv_bytes_blocking(data_len).decode('utf-8')
-                    scram_client.process_server_final_message(server_final)
-
-                except (ConnectionError, TimeoutError) as e:
-                    log.exception("%s: Error receiving reply from server", self)
-                    err = Errors.KafkaConnectionError("%s: %s" % (self, e))
-                    close = True
-
-        if err is not None:
-            if close:
-                self.close(error=err)
-            return future.failure(err)
-
-        log.info(
-            '%s: Authenticated as %s via %s', self, self.config['sasl_plain_username'], self.config['sasl_mechanism']
-        )
-        return future.success(True)
-
-    def _try_authenticate_gssapi(self, future):
-        kerberos_damin_name = self.config['sasl_kerberos_domain_name'] or self.host
-        auth_id = self.config['sasl_kerberos_service_name'] + '@' + kerberos_damin_name
-        gssapi_name = gssapi.Name(
-            auth_id,
-            name_type=gssapi.NameType.hostbased_service
-        ).canonicalize(gssapi.MechType.kerberos)
-        log.debug('%s: GSSAPI name: %s', self, gssapi_name)
-
-        err = None
-        close = False
-        with self._lock:
-            if not self._can_send_recv():
-                err = Errors.NodeNotReadyError(str(self))
-                close = False
-            else:
-                # Establish security context and negotiate protection level
-                # For reference RFC 2222, section 7.2.1
-                try:
-                    # Exchange tokens until authentication either succeeds or fails
-                    client_ctx = gssapi.SecurityContext(name=gssapi_name, usage='initiate')
-                    received_token = None
-                    while not client_ctx.complete:
-                        # calculate an output token from kafka token (or None if first iteration)
-                        output_token = client_ctx.step(received_token)
-
-                        # pass output token to kafka, or send empty response if the security
-                        # context is complete (output token is None in that case)
-                        if output_token is None:
-                            self._send_bytes_blocking(Int32.encode(0))
-                        else:
-                            msg = output_token
-                            size = Int32.encode(len(msg))
-                            self._send_bytes_blocking(size + msg)
-
-                        # The server will send a token back. Processing of this token either
-                        # establishes a security context, or it needs further token exchange.
-                        # The gssapi will be able to identify the needed next step.
-                        # The connection is closed on failure.
-                        header = self._recv_bytes_blocking(4)
-                        (token_size,) = struct.unpack('>i', header)
-                        received_token = self._recv_bytes_blocking(token_size)
-
-                    # Process the security layer negotiation token, sent by the server
-                    # once the security context is established.
-
-                    # unwraps message containing supported protection levels and msg size
-                    msg = client_ctx.unwrap(received_token).message
-                    # Kafka currently doesn't support integrity or confidentiality security layers, so we
-                    # simply set QoP to 'auth' only (first octet). We reuse the max message size proposed
-                    # by the server
-                    msg = Int8.encode(SASL_QOP_AUTH & Int8.decode(io.BytesIO(msg[0:1]))) + msg[1:]
-                    # add authorization identity to the response, GSS-wrap and send it
-                    msg = client_ctx.wrap(msg + auth_id.encode(), False).message
-                    size = Int32.encode(len(msg))
-                    self._send_bytes_blocking(size + msg)
-
-                except (ConnectionError, TimeoutError) as e:
-                    log.exception("%s: Error receiving reply from server",  self)
-                    err = Errors.KafkaConnectionError("%s: %s" % (self, e))
-                    close = True
-                except Exception as e:
-                    err = e
-                    close = True
-
-        if err is not None:
-            if close:
-                self.close(error=err)
-            return future.failure(err)
-
-        log.info('%s: Authenticated as %s via GSSAPI', self, gssapi_name)
-        return future.success(True)
-
-    def _try_authenticate_oauth(self, future):
-        data = b''
-
-        msg = bytes(self._build_oauth_client_request().encode("utf-8"))
-        size = Int32.encode(len(msg))
-
-        err = None
-        close = False
-        with self._lock:
-            if not self._can_send_recv():
-                err = Errors.NodeNotReadyError(str(self))
-                close = False
-            else:
-                try:
-                    # Send SASL OAuthBearer request with OAuth token
-                    self._send_bytes_blocking(size + msg)
-
-                    # The server will send a zero sized message (that is Int32(0)) on success.
-                    # The connection is closed on failure
-                    data = self._recv_bytes_blocking(4)
-
-                except (ConnectionError, TimeoutError) as e:
-                    log.exception("%s: Error receiving reply from server", self)
-                    err = Errors.KafkaConnectionError("%s: %s" % (self, e))
-                    close = True
-
-        if err is not None:
-            if close:
-                self.close(error=err)
-            return future.failure(err)
-
-        if data != b'\x00\x00\x00\x00':
-            error = Errors.AuthenticationFailedError('Unrecognized response during authentication')
-            return future.failure(error)
-
-        log.info('%s: Authenticated via OAuth', self)
-        return future.success(True)
-
-    def _build_oauth_client_request(self):
-        token_provider = self.config['sasl_oauth_token_provider']
-        return "n,,\x01auth=Bearer {}{}\x01\x01".format(token_provider.token(), self._token_extensions())
-
-    def _token_extensions(self):
-        """
-        Return a string representation of the OPTIONAL key-value pairs that can be sent with an OAUTHBEARER
-        initial request.
-        """
-        token_provider = self.config['sasl_oauth_token_provider']
-
-        # Only run if the #extensions() method is implemented by the clients Token Provider class
-        # Builds up a string separated by \x01 via a dict of key value pairs
-        if callable(getattr(token_provider, "extensions", None)) and len(token_provider.extensions()) > 0:
-            msg = "\x01".join(["{}={}".format(k, v) for k, v in token_provider.extensions().items()])
-            return "\x01" + msg
+    def _send_sasl_authenticate(self, sasl_auth_bytes):
+        version = self._sasl_handshake_version()
+        if version == 1:
+            request = SaslAuthenticateRequest[0](sasl_auth_bytes)
+            self._send(request, blocking=True)
         else:
-            return ""
+            log.debug('%s: Sending %d raw sasl auth bytes to server', self, len(sasl_auth_bytes))
+            try:
+                self._send_bytes_blocking(Int32.encode(len(sasl_auth_bytes)) + sasl_auth_bytes)
+            except (ConnectionError, TimeoutError) as e:
+                log.exception("%s: Error sending sasl auth bytes to server", self)
+                err = Errors.KafkaConnectionError("%s: %s" % (self, e))
+                self.close(error=err)
+
+    def _recv_sasl_authenticate(self):
+        version = self._sasl_handshake_version()
+        # GSSAPI mechanism does not get a final recv in old non-framed mode
+        if version == 0 and self._sasl_mechanism.is_done():
+            return b''
+
+        try:
+            data = self._recv_bytes_blocking(4)
+            nbytes = Int32.decode(io.BytesIO(data))
+            data += self._recv_bytes_blocking(nbytes)
+        except (ConnectionError, TimeoutError) as e:
+            log.exception("%s: Error receiving sasl auth bytes from server", self)
+            err = Errors.KafkaConnectionError("%s: %s" % (self, e))
+            self.close(error=err)
+            return
+
+        if version == 1:
+            ((correlation_id, response),) = self._protocol.receive_bytes(data)
+            (future, timestamp, _timeout) = self.in_flight_requests.pop(correlation_id)
+            latency_ms = (time.time() - timestamp) * 1000
+            if self._sensors:
+                self._sensors.request_time.record(latency_ms)
+            log.debug('%s: Response %d (%s ms): %s', self, correlation_id, latency_ms, response)
+
+            error_type = Errors.for_code(response.error_code)
+            if error_type is not Errors.NoError:
+                log.error("%s: SaslAuthenticate error: %s (%s)",
+                          self, error_type.__name__, response.error_message)
+                self.close(error=error_type(response.error_message))
+                return
+            return response.auth_bytes
+        else:
+            # unframed bytes w/ SaslHandhake v0
+            log.debug('%s: Received %d raw sasl auth bytes from server', self, nbytes)
+            return data[4:]
+
+    def _sasl_authenticate(self, future):
+        while not self._sasl_mechanism.is_done():
+            send_token = self._sasl_mechanism.auth_bytes()
+            self._send_sasl_authenticate(send_token)
+            if not self._can_send_recv():
+                return future.failure(Errors.KafkaConnectionError("%s: Connection failure during Sasl Authenticate" % self))
+
+            recv_token = self._recv_sasl_authenticate()
+            if recv_token is None:
+                return future.failure(Errors.KafkaConnectionError("%s: Connection failure during Sasl Authenticate" % self))
+            else:
+                self._sasl_mechanism.receive(recv_token)
+
+        if self._sasl_mechanism.is_authenticated():
+            log.info('%s: %s', self, self._sasl_mechanism.auth_details())
+            return future.success(True)
+        else:
+            return future.failure(Errors.SaslAuthenticationFailedError('Failed to authenticate via SASL %s' % self.config['sasl_mechanism']))
 
     def blacked_out(self):
         """
@@ -855,20 +834,45 @@ class BrokerConnection(object):
         re-establish a connection yet
         """
         if self.state is ConnectionStates.DISCONNECTED:
-            if time.time() < self.last_attempt + self._reconnect_backoff:
-                return True
+            return self.connection_delay() > 0
         return False
+
+    def throttled(self):
+        """
+        Return True if we are connected but currently throttled.
+        """
+        if self.state is not ConnectionStates.CONNECTED:
+            return False
+        return self.throttle_delay() > 0
+
+    def throttle_delay(self):
+        """
+        Return the number of milliseconds to wait until connection is no longer throttled.
+        """
+        if self._throttle_time is not None:
+            remaining_ms = (self._throttle_time - time.time()) * 1000
+            if remaining_ms > 0:
+                return remaining_ms
+            else:
+                self._throttle_time = None
+                return 0
+        return 0
 
     def connection_delay(self):
         """
         Return the number of milliseconds to wait, based on the connection
-        state, before attempting to send data. When disconnected, this respects
-        the reconnect backoff time. When connecting or connected, returns a very
+        state, before attempting to send data. When connecting or disconnected,
+        this respects the reconnect backoff time. When connected, returns a very
         large number to handle slow/stalled connections.
         """
-        time_waited = time.time() - (self.last_attempt or 0)
-        if self.state is ConnectionStates.DISCONNECTED:
-            return max(self._reconnect_backoff - time_waited, 0) * 1000
+        if self.disconnected() or self.connecting():
+            if len(self._gai) > 0:
+                return 0
+            elif self.config["socks5_proxy"] and Socks5Wrapper.use_remote_lookup(self.config["socks5_proxy"]):
+                return 0
+            else:
+                time_waited = time.time() - self.last_attempt
+                return max(self._reconnect_backoff - time_waited, 0) * 1000
         else:
             # When connecting or connected, we should be able to delay
             # indefinitely since other events (connection or data acked) will
@@ -884,15 +888,32 @@ class BrokerConnection(object):
         different states, such as SSL handshake, authorization, etc)."""
         return self.state in (ConnectionStates.CONNECTING,
                               ConnectionStates.HANDSHAKE,
-                              ConnectionStates.AUTHENTICATING)
+                              ConnectionStates.AUTHENTICATING,
+                              ConnectionStates.API_VERSIONS_SEND,
+                              ConnectionStates.API_VERSIONS_RECV)
+
+    def initializing(self):
+        """Returns True if socket is connected but full connection is not complete.
+        During this time the connection may send api requests to the broker to
+        check api versions and perform SASL authentication."""
+        return self.state in (ConnectionStates.AUTHENTICATING,
+                              ConnectionStates.API_VERSIONS_SEND,
+                              ConnectionStates.API_VERSIONS_RECV)
 
     def disconnected(self):
         """Return True iff socket is closed"""
         return self.state is ConnectionStates.DISCONNECTED
 
+    def connect_failed(self):
+        """Return True iff connection attempt failed after attempting all dns records"""
+        return self.disconnected() and self.last_attempt >= 0 and len(self._gai) == 0
+
     def _reset_reconnect_backoff(self):
         self._failures = 0
         self._reconnect_backoff = self.config['reconnect_backoff_ms'] / 1000.0
+
+    def _reconnect_jitter_pct(self):
+        return uniform(0.8, 1.2)
 
     def _update_reconnect_backoff(self):
         # Do not mark as failure if there are more dns entries available to try
@@ -902,7 +923,7 @@ class BrokerConnection(object):
             self._failures += 1
             self._reconnect_backoff = self.config['reconnect_backoff_ms'] * 2 ** (self._failures - 1)
             self._reconnect_backoff = min(self._reconnect_backoff, self.config['reconnect_backoff_max_ms'])
-            self._reconnect_backoff *= uniform(0.8, 1.2)
+            self._reconnect_backoff *= self._reconnect_jitter_pct()
             self._reconnect_backoff /= 1000.0
             log.debug('%s: reconnect backoff %s after %s failures', self, self._reconnect_backoff, self._failures)
 
@@ -927,9 +948,12 @@ class BrokerConnection(object):
         with self._lock:
             if self.state is ConnectionStates.DISCONNECTED:
                 return
-            log.info('%s: Closing connection. %s', self, error or '')
-            self._update_reconnect_backoff()
+            log.log(logging.ERROR if error else logging.INFO, '%s: Closing connection. %s', self, error or '')
+            if error:
+                self._update_reconnect_backoff()
+            self._api_versions_future = None
             self._sasl_auth_future = None
+            self._init_sasl_mechanism()
             self._protocol = KafkaProtocol(
                 client_id=self.config['client_id'],
                 api_version=self.config['api_version'])
@@ -946,30 +970,47 @@ class BrokerConnection(object):
             # the socket fd from selectors cleanly.
             sock = self._sock
             self._sock = None
+            self._socks5_proxy = None
 
         # drop lock before state change callback and processing futures
         self.config['state_change_callback'](self.node_id, sock, self)
-        sock.close()
-        for (_correlation_id, (future, _timestamp)) in ifrs:
+        if sock:
+            sock.close()
+        for (_correlation_id, (future, _timestamp, _timeout)) in ifrs:
             future.failure(error)
 
     def _can_send_recv(self):
         """Return True iff socket is ready for requests / responses"""
-        return self.state in (ConnectionStates.AUTHENTICATING,
-                              ConnectionStates.CONNECTED)
+        return self.connected() or self.initializing()
 
-    def send(self, request, blocking=True):
-        """Queue request for async network send, return Future()"""
+    def send(self, request, blocking=True, request_timeout_ms=None):
+        """Queue request for async network send, return Future()
+
+        Arguments:
+            request (Request): kafka protocol request object to send.
+
+        Keyword Arguments:
+            blocking (bool, optional): Whether to immediately send via
+                blocking socket I/O. Default: True.
+            request_timeout_ms: Custom timeout in milliseconds for request.
+                Default: None (uses value from connection configuration)
+
+        Returns: future
+        """
         future = Future()
         if self.connecting():
             return future.failure(Errors.NodeNotReadyError(str(self)))
         elif not self.connected():
             return future.failure(Errors.KafkaConnectionError(str(self)))
         elif not self.can_send_more():
+            # very small race here, but prefer it over breaking abstraction to check self._throttle_time
+            if self.throttled():
+                return future.failure(Errors.ThrottlingQuotaExceededError(str(self)))
             return future.failure(Errors.TooManyInFlightRequests(str(self)))
-        return self._send(request, blocking=blocking)
+        return self._send(request, blocking=blocking, request_timeout_ms=request_timeout_ms)
 
-    def _send(self, request, blocking=True):
+    def _send(self, request, blocking=True, request_timeout_ms=None):
+        request_timeout_ms = request_timeout_ms or self.config['request_timeout_ms']
         future = Future()
         with self._lock:
             if not self._can_send_recv():
@@ -980,11 +1021,12 @@ class BrokerConnection(object):
 
             correlation_id = self._protocol.send_request(request)
 
-            log.debug('%s Request %d: %s', self, correlation_id, request)
+            log.debug('%s: Request %d (timeout_ms %s): %s', self, correlation_id, request_timeout_ms, request)
             if request.expect_response():
-                sent_time = time.time()
                 assert correlation_id not in self.in_flight_requests, 'Correlation ID already in-flight!'
-                self.in_flight_requests[correlation_id] = (future, sent_time)
+                sent_time = time.time()
+                timeout_at = sent_time + (request_timeout_ms / 1000)
+                self.in_flight_requests[correlation_id] = (future, sent_time, timeout_at)
             else:
                 future.success(None)
 
@@ -1013,7 +1055,7 @@ class BrokerConnection(object):
             return True
 
         except (ConnectionError, TimeoutError) as e:
-            log.exception("Error sending request data to %s", self)
+            log.exception("%s: Error sending request data", self)
             error = Errors.KafkaConnectionError("%s: %s" % (self, e))
             self.close(error=error)
             return False
@@ -1053,13 +1095,31 @@ class BrokerConnection(object):
             return len(self._send_buffer) == 0
 
         except (ConnectionError, TimeoutError, Exception) as e:
-            log.exception("Error sending request data to %s", self)
+            log.exception("%s: Error sending request data", self)
             error = Errors.KafkaConnectionError("%s: %s" % (self, e))
             self.close(error=error)
             return False
 
+    def _maybe_throttle(self, response):
+        throttle_time_ms = getattr(response, 'throttle_time_ms', 0)
+        if self._sensors:
+            self._sensors.throttle_time.record(throttle_time_ms)
+        if not throttle_time_ms:
+            if self._throttle_time is not None:
+                self._throttle_time = None
+            return
+        # Client side throttling enabled in v2.0 brokers
+        # prior to that throttling (if present) was managed broker-side
+        if self.config['api_version'] is not None and self.config['api_version'] >= (2, 0):
+            throttle_time = time.time() + throttle_time_ms / 1000
+            self._throttle_time = max(throttle_time, self._throttle_time or 0)
+        log.warning("%s: %s throttled by broker (%d ms)", self,
+                    response.__class__.__name__, throttle_time_ms)
+
     def can_send_more(self):
-        """Return True unless there are max_in_flight_requests_per_connection."""
+        """Check for throttling / quota violations and max in-flight-requests"""
+        if self.throttle_delay() > 0:
+            return False
         max_ifrs = self.config['max_in_flight_requests_per_connection']
         return len(self.in_flight_requests) < max_ifrs
 
@@ -1070,18 +1130,20 @@ class BrokerConnection(object):
         """
         responses = self._recv()
         if not responses and self.requests_timed_out():
-            log.warning('%s timed out after %s ms. Closing connection.',
-                        self, self.config['request_timeout_ms'])
+            timed_out = self.timed_out_ifrs()
+            timeout_ms = (timed_out[0][2] - timed_out[0][1]) * 1000
+            log.warning('%s: timed out after %s ms. Closing connection.',
+                        self, timeout_ms)
             self.close(error=Errors.RequestTimedOutError(
                 'Request timed out after %s ms' %
-                self.config['request_timeout_ms']))
+                timeout_ms))
             return ()
 
         # augment responses w/ correlation_id, future, and timestamp
         for i, (correlation_id, response) in enumerate(responses):
             try:
                 with self._lock:
-                    (future, timestamp) = self.in_flight_requests.pop(correlation_id)
+                    (future, timestamp, _timeout) = self.in_flight_requests.pop(correlation_id)
             except KeyError:
                 self.close(Errors.KafkaConnectionError('Received unrecognized correlation id'))
                 return ()
@@ -1089,7 +1151,8 @@ class BrokerConnection(object):
             if self._sensors:
                 self._sensors.request_time.record(latency_ms)
 
-            log.debug('%s Response %d (%s ms): %s', self, correlation_id, latency_ms, response)
+            log.debug('%s: Response %d (%s ms): %s', self, correlation_id, latency_ms, response)
+            self._maybe_throttle(response)
             responses[i] = (response, future)
 
         return responses
@@ -1100,7 +1163,7 @@ class BrokerConnection(object):
         err = None
         with self._lock:
             if not self._can_send_recv():
-                log.warning('%s cannot recv: socket not connected', self)
+                log.warning('%s: cannot recv: socket not connected', self)
                 return ()
 
             while len(recvd) < self.config['sock_chunk_buffer_count']:
@@ -1150,36 +1213,30 @@ class BrokerConnection(object):
         return ()
 
     def requests_timed_out(self):
+        return self.next_ifr_request_timeout_ms() == 0
+
+    def timed_out_ifrs(self):
+        now = time.time()
+        ifrs = sorted(self.in_flight_requests.values(), reverse=True, key=lambda ifr: ifr[2])
+        return list(filter(lambda ifr: ifr[2] <= now, ifrs))
+
+    def next_ifr_request_timeout_ms(self):
         with self._lock:
             if self.in_flight_requests:
-                get_timestamp = lambda v: v[1]
-                oldest_at = min(map(get_timestamp,
-                                    self.in_flight_requests.values()))
-                timeout = self.config['request_timeout_ms'] / 1000.0
-                if time.time() >= oldest_at + timeout:
-                    return True
-            return False
-
-    def _handle_api_version_response(self, response):
-        error_type = Errors.for_code(response.error_code)
-        assert error_type is Errors.NoError, "API version check failed"
-        self._api_versions = dict([
-            (api_key, (min_version, max_version))
-            for api_key, min_version, max_version in response.api_versions
-        ])
-        return self._api_versions
+                def get_timeout(v):
+                    return v[2]
+                next_timeout = min(map(get_timeout,
+                                   self.in_flight_requests.values()))
+                return max(0, (next_timeout - time.time()) * 1000)
+            else:
+                return float('inf')
 
     def get_api_versions(self):
-        if self._api_versions is not None:
-            return self._api_versions
-
-        version = self.check_version()
-        if version < (0, 10, 0):
-            raise Errors.UnsupportedVersionError(
-                "ApiVersion not supported by cluster version {} < 0.10.0"
-                .format(version))
-        # _api_versions is set as a side effect of check_versions() on a cluster
-        # that supports 0.10.0 or later
+        # _api_versions is set as a side effect of first connection
+        # which should typically be bootstrap, but call check_version
+        # if that hasn't happened yet
+        if self._api_versions is None:
+            self.check_version()
         return self._api_versions
 
     def _infer_broker_version_from_api_versions(self, api_versions):
@@ -1187,140 +1244,69 @@ class BrokerConnection(object):
         # in reverse order. As soon as we find one that works, return it
         test_cases = [
             # format (<broker version>, <needed struct>)
-            ((2, 6, 0), DescribeClientQuotasRequest[0]),
-            ((2, 5, 0), DescribeAclsRequest_v2),
-            ((2, 4, 0), ProduceRequest[8]),
-            ((2, 3, 0), FetchRequest[11]),
-            ((2, 2, 0), OffsetRequest[5]),
-            ((2, 1, 0), FetchRequest[10]),
-            ((2, 0, 0), FetchRequest[8]),
-            ((1, 1, 0), FetchRequest[7]),
-            ((1, 0, 0), MetadataRequest[5]),
-            ((0, 11, 0), MetadataRequest[4]),
+            # Make sure to update consumer_integration test check when adding newer versions.
+            # ((3, 9), FetchRequest[17]),
+            # ((3, 8), ProduceRequest[11]),
+            # ((3, 7), FetchRequest[16]),
+            # ((3, 6), AddPartitionsToTxnRequest[4]),
+            # ((3, 5), FetchRequest[15]),
+            # ((3, 4), StopReplicaRequest[3]), # broker-internal api...
+            # ((3, 3), DescribeAclsRequest[3]),
+            # ((3, 2), JoinGroupRequest[9]),
+            # ((3, 1), FetchRequest[13]),
+            # ((3, 0), ListOffsetsRequest[7]),
+            # ((2, 8), ProduceRequest[9]),
+            # ((2, 7), FetchRequest[12]),
+            # ((2, 6), ListGroupsRequest[4]),
+            # ((2, 5), JoinGroupRequest[7]),
+            ((2, 6), DescribeClientQuotasRequest[0]),
+            ((2, 5), DescribeAclsRequest[2]),
+            ((2, 4), ProduceRequest[8]),
+            ((2, 3), FetchRequest[11]),
+            ((2, 2), ListOffsetsRequest[5]),
+            ((2, 1), FetchRequest[10]),
+            ((2, 0), FetchRequest[8]),
+            ((1, 1), FetchRequest[7]),
+            ((1, 0), MetadataRequest[5]),
+            ((0, 11), MetadataRequest[4]),
             ((0, 10, 2), OffsetFetchRequest[2]),
             ((0, 10, 1), MetadataRequest[2]),
         ]
 
         # Get the best match of test cases
-        for broker_version, struct in sorted(test_cases, reverse=True):
-            if struct.API_KEY not in api_versions:
+        for broker_version, proto_struct in sorted(test_cases, reverse=True):
+            if proto_struct.API_KEY not in api_versions:
                 continue
-            min_version, max_version = api_versions[struct.API_KEY]
-            if min_version <= struct.API_VERSION <= max_version:
+            min_version, max_version = api_versions[proto_struct.API_KEY]
+            if min_version <= proto_struct.API_VERSION <= max_version:
                 return broker_version
 
-        # We know that ApiVersionResponse is only supported in 0.10+
+        # We know that ApiVersionsResponse is only supported in 0.10+
         # so if all else fails, choose that
         return (0, 10, 0)
 
-    def check_version(self, timeout=2, strict=False, topics=[]):
+    def check_version(self, timeout=2, **kwargs):
         """Attempt to guess the broker version.
+
+        Keyword Arguments:
+            timeout (numeric, optional): Maximum number of seconds to block attempting
+                to connect and check version. Default 2
 
         Note: This is a blocking call.
 
-        Returns: version tuple, i.e. (0, 10), (0, 9), (0, 8, 2), ...
+        Returns: version tuple, i.e. (3, 9), (2, 4), etc ...
+
+        Raises: NodeNotReadyError on timeout
         """
         timeout_at = time.time() + timeout
-        log.info('Probing node %s broker version', self.node_id)
-        # Monkeypatch some connection configurations to avoid timeouts
-        override_config = {
-            'request_timeout_ms': timeout * 1000,
-            'max_in_flight_requests_per_connection': 5
-        }
-        stashed = {}
-        for key in override_config:
-            stashed[key] = self.config[key]
-            self.config[key] = override_config[key]
-
-        def reset_override_configs():
-            for key in stashed:
-                self.config[key] = stashed[key]
-
-        # kafka kills the connection when it doesn't recognize an API request
-        # so we can send a test request and then follow immediately with a
-        # vanilla MetadataRequest. If the server did not recognize the first
-        # request, both will be failed with a ConnectionError that wraps
-        # socket.error (32, 54, or 104)
-        from kafka.protocol.admin import ApiVersionRequest, ListGroupsRequest
-        from kafka.protocol.commit import OffsetFetchRequest, GroupCoordinatorRequest
-
-        test_cases = [
-            # All cases starting from 0.10 will be based on ApiVersionResponse
-            ((0, 10), ApiVersionRequest[0]()),
-            ((0, 9), ListGroupsRequest[0]()),
-            ((0, 8, 2), GroupCoordinatorRequest[0]('kafka-python-default-group')),
-            ((0, 8, 1), OffsetFetchRequest[0]('kafka-python-default-group', [])),
-            ((0, 8, 0), MetadataRequest[0](topics)),
-        ]
-
-        for version, request in test_cases:
-            if not self.connect_blocking(timeout_at - time.time()):
-                reset_override_configs()
-                raise Errors.NodeNotReadyError()
-            f = self.send(request)
-            # HACK: sleeping to wait for socket to send bytes
-            time.sleep(0.1)
-            # when broker receives an unrecognized request API
-            # it abruptly closes our socket.
-            # so we attempt to send a second request immediately
-            # that we believe it will definitely recognize (metadata)
-            # the attempt to write to a disconnected socket should
-            # immediately fail and allow us to infer that the prior
-            # request was unrecognized
-            mr = self.send(MetadataRequest[0](topics))
-
-            selector = self.config['selector']()
-            selector.register(self._sock, selectors.EVENT_READ)
-            while not (f.is_done and mr.is_done):
-                selector.select(1)
-                for response, future in self.recv():
-                    future.success(response)
-            selector.close()
-
-            if f.succeeded():
-                if isinstance(request, ApiVersionRequest[0]):
-                    # Starting from 0.10 kafka broker we determine version
-                    # by looking at ApiVersionResponse
-                    api_versions = self._handle_api_version_response(f.value)
-                    version = self._infer_broker_version_from_api_versions(api_versions)
-                log.info('Broker version identified as %s', '.'.join(map(str, version)))
-                log.info('Set configuration api_version=%s to skip auto'
-                         ' check_version requests on startup', version)
-                break
-
-            # Only enable strict checking to verify that we understand failure
-            # modes. For most users, the fact that the request failed should be
-            # enough to rule out a particular broker version.
-            if strict:
-                # If the socket flush hack did not work (which should force the
-                # connection to close and fail all pending requests), then we
-                # get a basic Request Timeout. This is not ideal, but we'll deal
-                if isinstance(f.exception, Errors.RequestTimedOutError):
-                    pass
-
-                # 0.9 brokers do not close the socket on unrecognized api
-                # requests (bug...). In this case we expect to see a correlation
-                # id mismatch
-                elif (isinstance(f.exception, Errors.CorrelationIdError) and
-                      version == (0, 10)):
-                    pass
-                elif six.PY2:
-                    assert isinstance(f.exception.args[0], socket.error)
-                    assert f.exception.args[0].errno in (32, 54, 104)
-                else:
-                    assert isinstance(f.exception.args[0], ConnectionError)
-            log.info("Broker is not v%s -- it did not recognize %s",
-                     version, request.__class__.__name__)
+        if not self.connect_blocking(timeout_at - time.time()):
+            raise Errors.NodeNotReadyError()
         else:
-            reset_override_configs()
-            raise Errors.UnrecognizedBrokerVersion()
-
-        reset_override_configs()
-        return version
+            return self._api_version
 
     def __str__(self):
-        return "<BrokerConnection node_id=%s host=%s:%d %s [%s %s]>" % (
-            self.node_id, self.host, self.port, self.state,
+        return "<BrokerConnection client_id=%s, node_id=%s host=%s:%d %s [%s %s]>" % (
+            self.config['client_id'], self.node_id, self.host, self.port, self.state,
             AFI_NAMES[self._sock_afi], self._sock_addr)
 
 
@@ -1377,6 +1363,16 @@ class BrokerConnectionMetrics(object):
                 'The maximum request latency in ms.'),
                 Max())
 
+            throttle_time = metrics.sensor('throttle-time')
+            throttle_time.add(metrics.metric_name(
+                'throttle-time-avg', metric_group_name,
+                'The average throttle time in ms.'),
+                Avg())
+            throttle_time.add(metrics.metric_name(
+                'throttle-time-max', metric_group_name,
+                'The maximum throttle time in ms.'),
+                Max())
+
         # if one sensor of the metrics has been registered for the connection,
         # then all other sensors should have been registered; and vice versa
         node_str = 'node-{0}'.format(node_id)
@@ -1428,9 +1424,23 @@ class BrokerConnectionMetrics(object):
                 'The maximum request latency in ms.'),
                 Max())
 
+            throttle_time = metrics.sensor(
+                node_str + '.throttle',
+                parents=[metrics.get_sensor('throttle-time')])
+            throttle_time.add(metrics.metric_name(
+                'throttle-time-avg', metric_group_name,
+                'The average throttle time in ms.'),
+                Avg())
+            throttle_time.add(metrics.metric_name(
+                'throttle-time-max', metric_group_name,
+                'The maximum throttle time in ms.'),
+                Max())
+
+
         self.bytes_sent = metrics.sensor(node_str + '.bytes-sent')
         self.bytes_received = metrics.sensor(node_str + '.bytes-received')
         self.request_time = metrics.sensor(node_str + '.latency')
+        self.throttle_time = metrics.sensor(node_str + '.throttle')
 
 
 def _address_family(address):
@@ -1498,32 +1508,6 @@ def get_ip_port_afi(host_and_port_str):
 
             af = _address_family(host)
             return host, port, af
-
-
-def collect_hosts(hosts, randomize=True):
-    """
-    Collects a comma-separated set of hosts (host:port) and optionally
-    randomize the returned list.
-    """
-
-    if isinstance(hosts, six.string_types):
-        hosts = hosts.strip().split(',')
-
-    result = []
-    afi = socket.AF_INET
-    for host_port in hosts:
-
-        host, port, afi = get_ip_port_afi(host_port)
-
-        if port < 0:
-            port = DEFAULT_KAFKA_PORT
-
-        result.append((host, port, afi))
-
-    if randomize:
-        shuffle(result)
-
-    return result
 
 
 def is_inet_4_or_6(gai):

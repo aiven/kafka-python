@@ -5,11 +5,11 @@ import struct
 import pytest
 
 from kafka.protocol.api import RequestHeader
-from kafka.protocol.commit import GroupCoordinatorRequest
 from kafka.protocol.fetch import FetchRequest, FetchResponse
+from kafka.protocol.find_coordinator import FindCoordinatorRequest
 from kafka.protocol.message import Message, MessageSet, PartialMessage
 from kafka.protocol.metadata import MetadataRequest
-from kafka.protocol.types import Int16, Int32, Int64, String, UnsignedVarInt32, CompactString, CompactArray, CompactBytes
+from kafka.protocol.types import Int16, Int32, Int64, String, UnsignedVarInt32, CompactString, CompactArray, CompactBytes, BitField
 
 
 def test_create_message():
@@ -168,7 +168,7 @@ def test_encode_message_header():
         b'client3',                        # ClientId
     ])
 
-    req = GroupCoordinatorRequest[0]('foo')
+    req = FindCoordinatorRequest[0]('foo')
     header = RequestHeader(req, correlation_id=4, client_id='client3')
     assert header.encode() == expect
 
@@ -273,7 +273,7 @@ def test_decode_fetch_response_partial():
 
 def test_struct_unrecognized_kwargs():
     try:
-        mr = MetadataRequest[0](topicz='foo')
+        _mr = MetadataRequest[0](topicz='foo')
         assert False, 'Structs should not allow unrecognized kwargs'
     except ValueError:
         pass
@@ -331,6 +331,14 @@ def test_compact_data_structs():
     assert CompactBytes.decode(io.BytesIO(b'\x00')) is None
     enc = CompactBytes.encode(b'')
     assert enc == b'\x01'
-    assert CompactBytes.decode(io.BytesIO(b'\x01')) is b''
+    assert CompactBytes.decode(io.BytesIO(b'\x01')) == b''
     enc = CompactBytes.encode(b'foo')
     assert CompactBytes.decode(io.BytesIO(enc)) == b'foo'
+
+
+@pytest.mark.parametrize(('test_set',), [
+    (set([0, 1, 5, 10, 31]),),
+    (set(range(32)),),
+])
+def test_bit_field(test_set):
+    assert BitField.decode(io.BytesIO(BitField.encode(test_set))) == test_set

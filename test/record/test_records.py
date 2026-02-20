@@ -2,7 +2,9 @@
 from __future__ import unicode_literals
 import pytest
 from kafka.record import MemoryRecords, MemoryRecordsBuilder
-from kafka.errors import CorruptRecordException
+from kafka.errors import CorruptRecordError
+
+from test.testutil import maybe_skip_unsupported_compression
 
 # This is real live data from Kafka 11 broker
 record_batch_data_v2 = [
@@ -58,6 +60,15 @@ record_batch_data_v0 = [
     # Fourth Message value = "123"
     b'\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x11\xfe\xb0\x1d\xbf\x00'
     b'\x00\xff\xff\xff\xff\x00\x00\x00\x03123'
+]
+
+# Single record control batch (abort)
+control_batch_data_v2 = [
+    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00R\x00\x00\x00\x00'
+    b'\x02e\x97\xff\xd0\x00\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+    b'\x98\x96\x7f\x00\x00\x00\x00\x00\x98\x96'
+    b'\x7f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff'
+    b'\x00\x00\x00\x01@\x00\x00\x00\x08\x00\x00\x00\x00,opaque-control-message\x00'
 ]
 
 
@@ -163,13 +174,14 @@ def test_memory_records_corrupt():
         b"\x00\x00\x00\x03"  # Length=3
         b"\xfe\xb0\x1d",  # Some random bytes
     )
-    with pytest.raises(CorruptRecordException):
+    with pytest.raises(CorruptRecordError):
         records.next_batch()
 
 
 @pytest.mark.parametrize("compression_type", [0, 1, 2, 3])
 @pytest.mark.parametrize("magic", [0, 1, 2])
 def test_memory_records_builder(magic, compression_type):
+    maybe_skip_unsupported_compression(compression_type)
     builder = MemoryRecordsBuilder(
         magic=magic, compression_type=compression_type, batch_size=1024 * 10)
     base_size = builder.size_in_bytes()  # V2 has a header before
@@ -198,7 +210,7 @@ def test_memory_records_builder(magic, compression_type):
     # Size should remain the same after closing. No trailing bytes
     builder.close()
     assert builder.compression_rate() > 0
-    expected_size = size_before_close * builder.compression_rate()
+    expected_size = int(size_before_close * builder.compression_rate())
     assert builder.is_full()
     assert builder.size_in_bytes() == expected_size
     buffer = builder.buffer()
@@ -230,3 +242,18 @@ def test_memory_records_builder_full(magic, compression_type):
         key=None, timestamp=None, value=b"M")
     assert metadata is None
     assert builder.next_offset() == 1
+
+
+def test_control_record_v2():
+    data_bytes = b"".join(control_batch_data_v2)
+    records = MemoryRecords(data_bytes)
+
+    assert records.has_next() is True
+    batch = records.next_batch()
+    assert batch.is_control_batch is True
+    recs = list(batch)
+    assert len(recs) == 1
+    assert recs[0].version == 0
+    assert recs[0].type == 0
+    assert recs[0].abort is True
+    assert recs[0].commit is False

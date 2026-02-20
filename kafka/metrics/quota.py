@@ -3,6 +3,8 @@ from __future__ import absolute_import
 
 class Quota(object):
     """An upper or lower bound for metrics"""
+    __slots__ = ('_bound', '_upper')
+
     def __init__(self, bound, is_upper):
         self._bound = bound
         self._upper = is_upper
@@ -34,7 +36,7 @@ class Quota(object):
     def __eq__(self, other):
         if self is other:
             return True
-        return (type(self) == type(other) and
+        return (isinstance(self, type(other)) and
                 self.bound == other.bound and
                 self.is_upper_bound() == other.is_upper_bound())
 

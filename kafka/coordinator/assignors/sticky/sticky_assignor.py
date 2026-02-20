@@ -2,11 +2,10 @@ import logging
 from collections import defaultdict, namedtuple
 from copy import deepcopy
 
-from kafka.cluster import ClusterMetadata
 from kafka.coordinator.assignors.abstract import AbstractPartitionAssignor
 from kafka.coordinator.assignors.sticky.partition_movements import PartitionMovements
 from kafka.coordinator.assignors.sticky.sorted_set import SortedSet
-from kafka.coordinator.protocol import ConsumerProtocolMemberMetadata, ConsumerProtocolMemberAssignment
+from kafka.coordinator.protocol import ConsumerProtocolMemberMetadata_v0, ConsumerProtocolMemberAssignment_v0
 from kafka.coordinator.protocol import Schema
 from kafka.protocol.struct import Struct
 from kafka.protocol.types import String, Array, Int32
@@ -67,6 +66,7 @@ class StickyAssignorUserDataV1(Struct):
 
 class StickyAssignmentExecutor:
     def __init__(self, cluster, members):
+        # a mapping of member_id => StickyAssignorMemberMetadataV1
         self.members = members
         # a mapping between consumers and their assigned partitions that is updated during assignment procedure
         self.current_assignment = defaultdict(list)
@@ -604,7 +604,7 @@ class StickyPartitionAssignor(AbstractPartitionAssignor):
 
         assignment = {}
         for member_id in members:
-            assignment[member_id] = ConsumerProtocolMemberAssignment(
+            assignment[member_id] = ConsumerProtocolMemberAssignment_v0(
                 cls.version, sorted(executor.get_final_assignment(member_id)), b''
             )
         return assignment
@@ -626,16 +626,16 @@ class StickyPartitionAssignor(AbstractPartitionAssignor):
         user_data = metadata.user_data
         if not user_data:
             return StickyAssignorMemberMetadataV1(
-                partitions=[], generation=cls.DEFAULT_GENERATION_ID, subscription=metadata.subscription
+                partitions=[], generation=cls.DEFAULT_GENERATION_ID, subscription=metadata.topics
             )
 
         try:
             decoded_user_data = StickyAssignorUserDataV1.decode(user_data)
-        except Exception as e:
+        except Exception:
             # ignore the consumer's previous assignment if it cannot be parsed
-            log.error("Could not parse member data", e)     # pylint: disable=logging-too-many-args
+            log.exception("Could not parse member data")
             return StickyAssignorMemberMetadataV1(
-                partitions=[], generation=cls.DEFAULT_GENERATION_ID, subscription=metadata.subscription
+                partitions=[], generation=cls.DEFAULT_GENERATION_ID, subscription=metadata.topics
             )
 
         member_partitions = []
@@ -643,7 +643,7 @@ class StickyPartitionAssignor(AbstractPartitionAssignor):
             member_partitions.extend([TopicPartition(topic, partition) for partition in partitions])
         return StickyAssignorMemberMetadataV1(
             # pylint: disable=no-member
-            partitions=member_partitions, generation=decoded_user_data.generation, subscription=metadata.subscription
+            partitions=member_partitions, generation=decoded_user_data.generation, subscription=metadata.topics
         )
 
     @classmethod
@@ -660,9 +660,9 @@ class StickyPartitionAssignor(AbstractPartitionAssignor):
             partitions_by_topic = defaultdict(list)
             for topic_partition in member_assignment_partitions:
                 partitions_by_topic[topic_partition.topic].append(topic_partition.partition)
-            data = StickyAssignorUserDataV1(six.viewitems(partitions_by_topic), generation)
+            data = StickyAssignorUserDataV1(list(partitions_by_topic.items()), generation)
             user_data = data.encode()
-        return ConsumerProtocolMemberMetadata(cls.version, list(topics), user_data)
+        return ConsumerProtocolMemberMetadata_v0(cls.version, list(topics), user_data)
 
     @classmethod
     def on_assignment(cls, assignment):

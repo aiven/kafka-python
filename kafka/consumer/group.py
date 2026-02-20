@@ -2,6 +2,7 @@ from __future__ import absolute_import, division
 
 import copy
 import logging
+import re
 import socket
 import time
 
@@ -16,8 +17,9 @@ from kafka.coordinator.consumer import ConsumerCoordinator
 from kafka.coordinator.assignors.range import RangePartitionAssignor
 from kafka.coordinator.assignors.roundrobin import RoundRobinPartitionAssignor
 from kafka.metrics import MetricConfig, Metrics
-from kafka.protocol.offset import OffsetResetStrategy
-from kafka.structs import TopicPartition
+from kafka.protocol.list_offsets import OffsetResetStrategy
+from kafka.structs import OffsetAndMetadata, TopicPartition
+from kafka.util import Timer
 from kafka.version import __version__
 
 log = logging.getLogger(__name__)
@@ -56,10 +58,20 @@ class KafkaConsumer(six.Iterator):
             committing offsets. If None, auto-partition assignment (via
             group coordinator) and offset commits are disabled.
             Default: None
+        group_instance_id (str): A unique identifier of the consumer instance
+            provided by end user. Only non-empty strings are permitted. If set,
+            the consumer is treated as a static member, which means that only
+            one instance with this ID is allowed in the consumer group at any
+            time. This can be used in combination with a larger session timeout
+            to avoid group rebalances caused by transient unavailability (e.g.
+            process restarts). If not set, the consumer will join the group as
+            a dynamic member, which is the traditional behavior. Default: None
         key_deserializer (callable): Any callable that takes a
             raw message key and returns a deserialized key.
         value_deserializer (callable): Any callable that takes a
             raw message value and returns a deserialized value.
+        enable_incremental_fetch_sessions: (bool): Use incremental fetch sessions
+            when available / supported by kafka broker. See KIP-227. Default: True.
         fetch_min_bytes (int): Minimum amount of data the server should
             return for a fetch request, otherwise wait up to
             fetch_max_wait_ms for more data to accumulate. Default: 1.
@@ -98,7 +110,7 @@ class KafkaConsumer(six.Iterator):
             reconnection attempts will continue periodically with this fixed
             rate. To avoid connection storms, a randomization factor of 0.2
             will be applied to the backoff resulting in a random range between
-            20% below and 20% above the computed value. Default: 1000.
+            20% below and 20% above the computed value. Default: 30000.
         max_in_flight_requests_per_connection (int): Requests are pipelined
             to kafka brokers up to this number of maximum requests per
             broker connection. Default: 5.
@@ -118,6 +130,12 @@ class KafkaConsumer(six.Iterator):
             consumed. This ensures no on-the-wire or on-disk corruption to
             the messages occurred. This check adds some overhead, so it may
             be disabled in cases seeking extreme performance. Default: True
+        isolation_level (str): Configure KIP-98 transactional consumer by
+            setting to 'read_committed'. This will cause the consumer to
+            skip records from aborted transactions. Default: 'read_uncommitted'
+        allow_auto_create_topics (bool): Enable/disable auto topic creation
+            on metadata request. Only available with api_version >= (0, 11).
+            Default: True
         metadata_max_age_ms (int): The period of time in milliseconds after
             which we force a refresh of metadata, even if we haven't seen any
             partition leadership changes to proactively discover any new
@@ -195,10 +213,17 @@ class KafkaConsumer(six.Iterator):
             or other configuration forbids use of all the specified ciphers),
             an ssl.SSLError will be raised. See ssl.SSLContext.set_ciphers
         api_version (tuple): Specify which Kafka API version to use. If set to
-            None, the client will attempt to infer the broker version by probing
-            various APIs. Different versions enable different functionality.
+            None, the client will attempt to determine the broker version via
+            ApiVersionsRequest API or, for brokers earlier than 0.10, probing
+            various known APIs. Dynamic version checking is performed eagerly
+            during __init__ and can raise NoBrokersAvailableError if no connection
+            was made before timeout (see api_version_auto_timeout_ms below).
+            Different versions enable different functionality.
 
             Examples:
+                (3, 9) most recent broker release, enable all supported features
+                (0, 11) enables message format v2 (internal)
+                (0, 10, 0) enables sasl authentication and message format v1
                 (0, 9) enables full group coordination features with automatic
                     partition assignment and rebalancing,
                 (0, 8, 2) enables kafka-storage offset commits with manual
@@ -212,6 +237,7 @@ class KafkaConsumer(six.Iterator):
         api_version_auto_timeout_ms (int): number of milliseconds to throw a
             timeout exception from the constructor when checking the broker
             api version. Only applies if api_version set to None.
+            Default: 2000
         connections_max_idle_ms: Close idle connections after the number of
             milliseconds specified by this config. The broker closes idle
             connections after connections.max.idle.ms, so this avoids hitting
@@ -220,6 +246,7 @@ class KafkaConsumer(six.Iterator):
         metric_reporters (list): A list of classes to use as metrics reporters.
             Implementing the AbstractMetricsReporter interface allows plugging
             in classes that will be notified of new metric creation. Default: []
+        metrics_enabled (bool): Whether to track metrics on this instance. Default True.
         metrics_num_samples (int): The number of samples maintained to compute
             metrics. Default: 2
         metrics_sample_window_ms (int): The maximum age in milliseconds of
@@ -238,14 +265,17 @@ class KafkaConsumer(six.Iterator):
             Required if sasl_mechanism is PLAIN or one of the SCRAM mechanisms.
         sasl_plain_password (str): password for sasl PLAIN and SCRAM authentication.
             Required if sasl_mechanism is PLAIN or one of the SCRAM mechanisms.
+        sasl_kerberos_name (str or gssapi.Name): Constructed gssapi.Name for use with
+            sasl mechanism handshake. If provided, sasl_kerberos_service_name and
+            sasl_kerberos_domain name are ignored. Default: None.
         sasl_kerberos_service_name (str): Service name to include in GSSAPI
             sasl mechanism handshake. Default: 'kafka'
         sasl_kerberos_domain_name (str): kerberos domain name to use in GSSAPI
             sasl mechanism handshake. Default: one of bootstrap servers
-        sasl_oauth_token_provider (AbstractTokenProvider): OAuthBearer token provider
-            instance. (See kafka.oauth.abstract). Default: None
-        kafka_client (callable): Custom class / callable for creating KafkaClient instances
+        sasl_oauth_token_provider (kafka.sasl.oauth.AbstractTokenProvider): OAuthBearer
+            token provider instance. Default: None
         socks5_proxy (str): Socks5 proxy URL. Default: None
+        kafka_client (callable): Custom class / callable for creating KafkaClient instances
 
     Note:
         Configuration parameters are described in more detail at
@@ -255,8 +285,10 @@ class KafkaConsumer(six.Iterator):
         'bootstrap_servers': 'localhost',
         'client_id': 'kafka-python-' + __version__,
         'group_id': None,
+        'group_instance_id': None,
         'key_deserializer': None,
         'value_deserializer': None,
+        'enable_incremental_fetch_sessions': True,
         'fetch_max_wait_ms': 500,
         'fetch_min_bytes': 1,
         'fetch_max_bytes': 52428800,
@@ -264,13 +296,15 @@ class KafkaConsumer(six.Iterator):
         'request_timeout_ms': 305000, # chosen to be higher than the default of max_poll_interval_ms
         'retry_backoff_ms': 100,
         'reconnect_backoff_ms': 50,
-        'reconnect_backoff_max_ms': 1000,
+        'reconnect_backoff_max_ms': 30000,
         'max_in_flight_requests_per_connection': 5,
         'auto_offset_reset': 'latest',
         'enable_auto_commit': True,
         'auto_commit_interval_ms': 5000,
         'default_offset_commit_callback': lambda offsets, response: True,
         'check_crcs': True,
+        'isolation_level': 'read_uncommitted',
+        'allow_auto_create_topics': True,
         'metadata_max_age_ms': 5 * 60 * 1000,
         'partition_assignment_strategy': (RangePartitionAssignor, RoundRobinPartitionAssignor),
         'max_poll_records': 500,
@@ -296,6 +330,7 @@ class KafkaConsumer(six.Iterator):
         'api_version_auto_timeout_ms': 2000,
         'connections_max_idle_ms': 9 * 60 * 1000,
         'metric_reporters': [],
+        'metrics_enabled': True,
         'metrics_num_samples': 2,
         'metrics_sample_window_ms': 30000,
         'metric_group_prefix': 'consumer',
@@ -304,12 +339,12 @@ class KafkaConsumer(six.Iterator):
         'sasl_mechanism': None,
         'sasl_plain_username': None,
         'sasl_plain_password': None,
+        'sasl_kerberos_name': None,
         'sasl_kerberos_service_name': 'kafka',
         'sasl_kerberos_domain_name': None,
         'sasl_oauth_token_provider': None,
-        'legacy_iterator': False, # enable to revert to < 1.4.7 iterator
-        'kafka_client': KafkaClient,
         'socks5_proxy': None,
+        'kafka_client': KafkaClient,
     }
     DEFAULT_SESSION_TIMEOUT_MS_0_9 = 30000
 
@@ -339,13 +374,15 @@ class KafkaConsumer(six.Iterator):
                 "fetch_max_wait_ms ({})."
                 .format(connections_max_idle_ms, request_timeout_ms, fetch_max_wait_ms))
 
-        metrics_tags = {'client-id': self.config['client_id']}
-        metric_config = MetricConfig(samples=self.config['metrics_num_samples'],
-                                     time_window_ms=self.config['metrics_sample_window_ms'],
-                                     tags=metrics_tags)
-        reporters = [reporter() for reporter in self.config['metric_reporters']]
-        self._metrics = Metrics(metric_config, reporters)
-        # TODO _metrics likely needs to be passed to KafkaClient, etc.
+        if self.config['metrics_enabled']:
+            metrics_tags = {'client-id': self.config['client_id']}
+            metric_config = MetricConfig(samples=self.config['metrics_num_samples'],
+                                         time_window_ms=self.config['metrics_sample_window_ms'],
+                                         tags=metrics_tags)
+            reporters = [reporter() for reporter in self.config['metric_reporters']]
+            self._metrics = Metrics(metric_config, reporters)
+        else:
+            self._metrics = None
 
         # api_version was previously a str. Accept old format for now
         if isinstance(self.config['api_version'], str):
@@ -359,9 +396,8 @@ class KafkaConsumer(six.Iterator):
 
         self._client = self.config['kafka_client'](metrics=self._metrics, **self.config)
 
-        # Get auto-discovered version from client if necessary
-        if self.config['api_version'] is None:
-            self.config['api_version'] = self._client.config['api_version']
+        # Get auto-discovered / normalized version from client
+        self.config['api_version'] = self._client.config['api_version']
 
         # Coordinator configurations are different for older brokers
         # max_poll_interval_ms is not supported directly -- it must the be
@@ -382,11 +418,15 @@ class KafkaConsumer(six.Iterator):
                     "Request timeout (%s) must be larger than session timeout (%s)" %
                     (self.config['request_timeout_ms'], self.config['session_timeout_ms']))
 
+        if self.config['group_instance_id'] is not None:
+            if self.config['group_id'] is None:
+                raise KafkaConfigurationError("group_instance_id requires group_id")
+
         self._subscription = SubscriptionState(self.config['auto_offset_reset'])
         self._fetcher = Fetcher(
-            self._client, self._subscription, self._metrics, **self.config)
+            self._client, self._subscription, metrics=self._metrics, **self.config)
         self._coordinator = ConsumerCoordinator(
-            self._client, self._subscription, self._metrics,
+            self._client, self._subscription, metrics=self._metrics,
             assignors=self.config['partition_assignment_strategy'],
             **self.config)
         self._closed = False
@@ -396,6 +436,16 @@ class KafkaConsumer(six.Iterator):
         if topics:
             self._subscription.subscribe(topics=topics)
             self._client.set_topics(topics)
+
+    def _validate_group_instance_id(self, group_instance_id):
+        if not group_instance_id or not isinstance(group_instance_id, str):
+            raise KafkaConfigurationError("group_instance_id must be non-empty string")
+        if group_instance_id in (".", ".."):
+            raise KafkaConfigurationError("group_instance_id cannot be \".\" or \"..\"")
+        if len(group_instance_id) > 249:
+            raise KafkaConfigurationError("group_instance_id can't be longer than 249 characters")
+        if not re.match(r'^[A-Za-z0-9\.\_\-]+$', group_instance_id):
+            raise KafkaConfigurationError("group_instance_id is illegal: it contains a character other than ASCII alphanumerics, '.', '_' and '-'")
 
     def bootstrap_connected(self):
         """Return True if the bootstrap is connected."""
@@ -426,8 +476,15 @@ class KafkaConsumer(six.Iterator):
             no rebalance operation triggered when group membership or cluster
             and topic metadata change.
         """
-        self._subscription.assign_from_user(partitions)
-        self._client.set_topics([tp.topic for tp in partitions])
+        if not partitions:
+            self.unsubscribe()
+        else:
+            # make sure the offsets of topic partitions the consumer is unsubscribing from
+            # are committed since there will be no following rebalance
+            self._coordinator.maybe_auto_commit_offsets_now()
+            self._subscription.assign_from_user(partitions)
+            self._client.set_topics([tp.topic for tp in partitions])
+            log.debug("Subscribed to partition(s): %s", partitions)
 
     def assignment(self):
         """Get the TopicPartitions currently assigned to this consumer.
@@ -445,20 +502,23 @@ class KafkaConsumer(six.Iterator):
         """
         return self._subscription.assigned_partitions()
 
-    def close(self, autocommit=True):
+    def close(self, autocommit=True, timeout_ms=None):
         """Close the consumer, waiting indefinitely for any needed cleanup.
 
         Keyword Arguments:
             autocommit (bool): If auto-commit is configured for this consumer,
                 this optional flag causes the consumer to attempt to commit any
                 pending consumed offsets prior to close. Default: True
+            timeout_ms (num, optional): Milliseconds to wait for auto-commit.
+                Default: None
         """
         if self._closed:
             return
         log.debug("Closing the KafkaConsumer.")
         self._closed = True
-        self._coordinator.close(autocommit=autocommit)
-        self._metrics.close()
+        self._coordinator.close(autocommit=autocommit, timeout_ms=timeout_ms)
+        if self._metrics:
+            self._metrics.close()
         self._client.close()
         try:
             self.config['key_deserializer'].close()
@@ -504,7 +564,7 @@ class KafkaConsumer(six.Iterator):
             offsets, callback=callback)
         return future
 
-    def commit(self, offsets=None):
+    def commit(self, offsets=None, timeout_ms=None):
         """Commit offsets to kafka, blocking until success or error.
 
         This commits offsets only to Kafka. The offsets committed using this API
@@ -528,17 +588,16 @@ class KafkaConsumer(six.Iterator):
         assert self.config['group_id'] is not None, 'Requires group_id'
         if offsets is None:
             offsets = self._subscription.all_consumed_offsets()
-        self._coordinator.commit_offsets_sync(offsets)
+        self._coordinator.commit_offsets_sync(offsets, timeout_ms=timeout_ms)
 
-    def committed(self, partition, metadata=False):
+    def committed(self, partition, metadata=False, timeout_ms=None):
         """Get the last committed offset for the given partition.
 
         This offset will be used as the position for the consumer
         in the event of a failure.
 
-        This call may block to do a remote call if the partition in question
-        isn't assigned to this consumer or if the consumer hasn't yet
-        initialized its cache of committed offsets.
+        This call will block to do a remote call to get the latest committed
+        offsets from the server.
 
         Arguments:
             partition (TopicPartition): The partition to check.
@@ -547,28 +606,19 @@ class KafkaConsumer(six.Iterator):
 
         Returns:
             The last committed offset (int or OffsetAndMetadata), or None if there was no prior commit.
+
+        Raises:
+            KafkaTimeoutError if timeout_ms provided
+            BrokerResponseErrors if OffsetFetchRequest raises an error.
         """
         assert self.config['api_version'] >= (0, 8, 1), 'Requires >= Kafka 0.8.1'
         assert self.config['group_id'] is not None, 'Requires group_id'
         if not isinstance(partition, TopicPartition):
             raise TypeError('partition must be a TopicPartition namedtuple')
-        if self._subscription.is_assigned(partition):
-            committed = self._subscription.assignment[partition].committed
-            if committed is None:
-                self._coordinator.refresh_committed_offsets_if_needed()
-                committed = self._subscription.assignment[partition].committed
-        else:
-            commit_map = self._coordinator.fetch_committed_offsets([partition])
-            if partition in commit_map:
-                committed = commit_map[partition]
-            else:
-                committed = None
-
-        if committed is not None:
-            if metadata:
-                return committed
-            else:
-                return committed.offset
+        committed = self._coordinator.fetch_committed_offsets([partition], timeout_ms=timeout_ms)
+        if partition not in committed:
+            return None
+        return committed[partition] if metadata else committed[partition].offset
 
     def _fetch_all_topic_metadata(self):
         """A blocking call that fetches topic metadata for all topics in the
@@ -613,7 +663,7 @@ class KafkaConsumer(six.Iterator):
         if partitions is None:
             self._fetch_all_topic_metadata()
             partitions = cluster.partitions_for_topic(topic)
-        return partitions
+        return partitions or set()
 
     def poll(self, timeout_ms=0, max_records=None, update_offsets=True):
         """Fetch data from assigned topics / partitions.
@@ -653,84 +703,89 @@ class KafkaConsumer(six.Iterator):
         assert not self._closed, 'KafkaConsumer is closed'
 
         # Poll for new data until the timeout expires
-        start = time.time()
-        remaining = timeout_ms
+        timer = Timer(timeout_ms)
         while not self._closed:
-            records = self._poll_once(remaining, max_records, update_offsets=update_offsets)
+            records = self._poll_once(timer, max_records, update_offsets=update_offsets)
             if records:
                 return records
-
-            elapsed_ms = (time.time() - start) * 1000
-            remaining = timeout_ms - elapsed_ms
-
-            if remaining <= 0:
+            elif timer.expired:
                 break
-
         return {}
 
-    def _poll_once(self, timeout_ms, max_records, update_offsets=True):
+    def _poll_once(self, timer, max_records, update_offsets=True):
         """Do one round of polling. In addition to checking for new data, this does
         any needed heart-beating, auto-commits, and offset updates.
 
         Arguments:
-            timeout_ms (int): The maximum time in milliseconds to block.
+            timer (Timer): The maximum time in milliseconds to block.
 
         Returns:
             dict: Map of topic to list of records (may be empty).
         """
-        self._coordinator.poll()
+        if not self._coordinator.poll(timeout_ms=timer.timeout_ms):
+            log.debug('poll: timeout during coordinator.poll(); returning early')
+            return {}
 
-        # Fetch positions if we have partitions we're subscribed to that we
-        # don't know the offset for
-        if not self._subscription.has_all_fetch_positions():
-            self._update_fetch_positions(self._subscription.missing_fetch_positions())
+        has_all_fetch_positions = self._update_fetch_positions(timeout_ms=timer.timeout_ms)
 
         # If data is available already, e.g. from a previous network client
         # poll() call to commit, then just return it immediately
         records, partial = self._fetcher.fetched_records(max_records, update_offsets=update_offsets)
+        log.debug('poll: fetched records: %s, %s', records, partial)
+        # Before returning the fetched records, we can send off the
+        # next round of fetches and avoid block waiting for their
+        # responses to enable pipelining while the user is handling the
+        # fetched records.
+        if not partial:
+            log.debug("poll: Sending fetches")
+            futures = self._fetcher.send_fetches()
+            if len(futures):
+                self._client.poll(timeout_ms=0)
+
         if records:
-            # Before returning the fetched records, we can send off the
-            # next round of fetches and avoid block waiting for their
-            # responses to enable pipelining while the user is handling the
-            # fetched records.
-            if not partial:
-                futures = self._fetcher.send_fetches()
-                if len(futures):
-                    self._client.poll(timeout_ms=0)
             return records
 
-        # Send any new fetches (won't resend pending fetches)
-        futures = self._fetcher.send_fetches()
-        if len(futures):
-            self._client.poll(timeout_ms=0)
+        # We do not want to be stuck blocking in poll if we are missing some positions
+        # since the offset lookup may be backing off after a failure
+        poll_timeout_ms = timer.timeout_ms
+        if self.config['group_id'] is not None:
+            poll_timeout_ms = min(poll_timeout_ms, self._coordinator.time_to_next_poll() * 1000)
+        if not has_all_fetch_positions:
+            log.debug('poll: do not have all fetch positions...')
+            poll_timeout_ms = min(poll_timeout_ms, self.config['retry_backoff_ms'])
 
-        timeout_ms = min(timeout_ms, self._coordinator.time_to_next_poll() * 1000)
-        self._client.poll(timeout_ms=timeout_ms)
+        self._client.poll(timeout_ms=poll_timeout_ms)
         # after the long poll, we should check whether the group needs to rebalance
         # prior to returning data so that the group can stabilize faster
         if self._coordinator.need_rejoin():
+            log.debug('poll: coordinator needs rejoin; returning early')
             return {}
 
         records, _ = self._fetcher.fetched_records(max_records, update_offsets=update_offsets)
         return records
 
-    def position(self, partition):
+    def position(self, partition, timeout_ms=None):
         """Get the offset of the next record that will be fetched
 
         Arguments:
             partition (TopicPartition): Partition to check
 
         Returns:
-            int: Offset
+            int: Offset or None
         """
         if not isinstance(partition, TopicPartition):
             raise TypeError('partition must be a TopicPartition namedtuple')
         assert self._subscription.is_assigned(partition), 'Partition is not assigned'
-        offset = self._subscription.assignment[partition].position
-        if offset is None:
-            self._update_fetch_positions([partition])
-            offset = self._subscription.assignment[partition].position
-        return offset
+
+        timer = Timer(timeout_ms)
+        position = self._subscription.assignment[partition].position
+        while position is None and not timer.expired:
+            # batch update fetch positions for any partitions without a valid position
+            self._update_fetch_positions(timeout_ms=timer.timeout_ms)
+            self._client.poll(timeout_ms=timer.timeout_ms)
+            position = self._subscription.assignment[partition].position
+        if position is not None:
+            return position.offset
 
     def highwater(self, partition):
         """Last known highwater offset for a partition.
@@ -824,8 +879,7 @@ class KafkaConsumer(six.Iterator):
         assert partition in self._subscription.assigned_partitions(), 'Unassigned partition'
         log.debug("Seeking to offset %s for partition %s", offset, partition)
         self._subscription.assignment[partition].seek(offset)
-        if not self.config['legacy_iterator']:
-            self._iterator = None
+        self._iterator = None
 
     def seek_to_beginning(self, *partitions):
         """Seek to the oldest available offset for partitions.
@@ -849,9 +903,8 @@ class KafkaConsumer(six.Iterator):
 
         for tp in partitions:
             log.debug("Seeking to beginning of partition %s", tp)
-            self._subscription.need_offset_reset(tp, OffsetResetStrategy.EARLIEST)
-        if not self.config['legacy_iterator']:
-            self._iterator = None
+            self._subscription.request_offset_reset(tp, OffsetResetStrategy.EARLIEST)
+        self._iterator = None
 
     def seek_to_end(self, *partitions):
         """Seek to the most recent available offset for partitions.
@@ -875,9 +928,8 @@ class KafkaConsumer(six.Iterator):
 
         for tp in partitions:
             log.debug("Seeking to end of partition %s", tp)
-            self._subscription.need_offset_reset(tp, OffsetResetStrategy.LATEST)
-        if not self.config['legacy_iterator']:
-            self._iterator = None
+            self._subscription.request_offset_reset(tp, OffsetResetStrategy.LATEST)
+        self._iterator = None
 
     def subscribe(self, topics=(), pattern=None, listener=None):
         """Subscribe to a list of topics, or a topic regex pattern.
@@ -948,13 +1000,16 @@ class KafkaConsumer(six.Iterator):
 
     def unsubscribe(self):
         """Unsubscribe from all topics and clear all assigned partitions."""
+        # make sure the offsets of topic partitions the consumer is unsubscribing from
+        # are committed since there will be no following rebalance
+        self._coordinator.maybe_auto_commit_offsets_now()
         self._subscription.unsubscribe()
-        self._coordinator.close()
+        if self.config['api_version'] >= (0, 9):
+            self._coordinator.maybe_leave_group()
         self._client.cluster.need_all_topic_metadata = False
         self._client.set_topics([])
         log.debug("Unsubscribed all topics or patterns and assigned partitions")
-        if not self.config['legacy_iterator']:
-            self._iterator = None
+        self._iterator = None
 
     def metrics(self, raw=False):
         """Get metrics on consumer performance.
@@ -966,6 +1021,8 @@ class KafkaConsumer(six.Iterator):
             This is an unstable interface. It may change in future
             releases without warning.
         """
+        if not self._metrics:
+            return
         if raw:
             return self._metrics.metrics.copy()
 
@@ -1021,7 +1078,7 @@ class KafkaConsumer(six.Iterator):
                 raise ValueError(
                     "The target time for partition {} is {}. The target time "
                     "cannot be negative.".format(tp, ts))
-        return self._fetcher.get_offsets_by_times(
+        return self._fetcher.offsets_by_times(
             timestamps, self.config['request_timeout_ms'])
 
     def beginning_offsets(self, partitions):
@@ -1087,7 +1144,7 @@ class KafkaConsumer(six.Iterator):
             return False
         return True
 
-    def _update_fetch_positions(self, partitions):
+    def _update_fetch_positions(self, timeout_ms=None):
         """Set the fetch position to the committed position (if there is one)
         or reset it using the offset reset policy the user has configured.
 
@@ -1095,30 +1152,36 @@ class KafkaConsumer(six.Iterator):
             partitions (List[TopicPartition]): The partitions that need
                 updating fetch positions.
 
+        Returns True if fetch positions updated, False if timeout or async reset is pending
+
         Raises:
             NoOffsetForPartitionError: If no offset is stored for a given
                 partition and no offset reset policy is defined.
         """
-        # Lookup any positions for partitions which are awaiting reset (which may be the
-        # case if the user called :meth:`seek_to_beginning` or :meth:`seek_to_end`. We do
-        # this check first to avoid an unnecessary lookup of committed offsets (which
-        # typically occurs when the user is manually assigning partitions and managing
-        # their own offsets).
-        self._fetcher.reset_offsets_if_needed(partitions)
+        if self._subscription.has_all_fetch_positions():
+            return True
 
-        if not self._subscription.has_all_fetch_positions():
-            # if we still don't have offsets for all partitions, then we should either seek
-            # to the last committed position or reset using the auto reset policy
-            if (self.config['api_version'] >= (0, 8, 1) and
-                self.config['group_id'] is not None):
-                # first refresh commits for all assigned partitions
-                self._coordinator.refresh_committed_offsets_if_needed()
+        if (self.config['api_version'] >= (0, 8, 1) and
+            self.config['group_id'] is not None):
+            # If there are any partitions which do not have a valid position and are not
+            # awaiting reset, then we need to fetch committed offsets. We will only do a
+            # coordinator lookup if there are partitions which have missing positions, so
+            # a consumer with manually assigned partitions can avoid a coordinator dependence
+            # by always ensuring that assigned partitions have an initial position.
+            if not self._coordinator.refresh_committed_offsets_if_needed(timeout_ms=timeout_ms):
+                return False
 
-            # Then, do any offset lookups in case some positions are not known
-            self._fetcher.update_fetch_positions(partitions)
+        # If there are partitions still needing a position and a reset policy is defined,
+        # request reset using the default policy. If no reset strategy is defined and there
+        # are partitions with a missing position, then we will raise an exception.
+        self._subscription.reset_missing_positions()
+
+        # Finally send an asynchronous request to lookup and update the positions of any
+        # partitions which are awaiting reset.
+        return not self._fetcher.reset_offsets_if_needed()
 
     def _message_generator_v2(self):
-        timeout_ms = 1000 * (self._consumer_timeout - time.time())
+        timeout_ms = 1000 * max(0, self._consumer_timeout - time.time())
         record_map = self.poll(timeout_ms=timeout_ms, update_offsets=False)
         for tp, records in six.iteritems(record_map):
             # Generators are stateful, and it is possible that the tp / records
@@ -1133,56 +1196,8 @@ class KafkaConsumer(six.Iterator):
                     log.debug("Not returning fetched records for partition %s"
                               " since it is no longer fetchable", tp)
                     break
-                self._subscription.assignment[tp].position = record.offset + 1
+                self._subscription.assignment[tp].position = OffsetAndMetadata(record.offset + 1, '', -1)
                 yield record
-
-    def _message_generator(self):
-        assert self.assignment() or self.subscription() is not None, 'No topic subscription or manual partition assignment'
-        while time.time() < self._consumer_timeout:
-
-            self._coordinator.poll()
-
-            # Fetch offsets for any subscribed partitions that we arent tracking yet
-            if not self._subscription.has_all_fetch_positions():
-                partitions = self._subscription.missing_fetch_positions()
-                self._update_fetch_positions(partitions)
-
-            poll_ms = min((1000 * (self._consumer_timeout - time.time())), self.config['retry_backoff_ms'])
-            self._client.poll(timeout_ms=poll_ms)
-
-            # after the long poll, we should check whether the group needs to rebalance
-            # prior to returning data so that the group can stabilize faster
-            if self._coordinator.need_rejoin():
-                continue
-
-            # We need to make sure we at least keep up with scheduled tasks,
-            # like heartbeats, auto-commits, and metadata refreshes
-            timeout_at = self._next_timeout()
-
-            # Short-circuit the fetch iterator if we are already timed out
-            # to avoid any unintentional interaction with fetcher setup
-            if time.time() > timeout_at:
-                continue
-
-            for msg in self._fetcher:
-                yield msg
-                if time.time() > timeout_at:
-                    log.debug("internal iterator timeout - breaking for poll")
-                    break
-                self._client.poll(timeout_ms=0)
-
-            # An else block on a for loop only executes if there was no break
-            # so this should only be called on a StopIteration from the fetcher
-            # We assume that it is safe to init_fetches when fetcher is done
-            # i.e., there are no more records stored internally
-            else:
-                self._fetcher.send_fetches()
-
-    def _next_timeout(self):
-        timeout = min(self._consumer_timeout,
-                      self._client.cluster.ttl() / 1000.0 + time.time(),
-                      self._coordinator.time_to_next_poll() + time.time())
-        return timeout
 
     def __iter__(self):  # pylint: disable=non-iterator-returned
         return self
@@ -1190,15 +1205,6 @@ class KafkaConsumer(six.Iterator):
     def __next__(self):
         if self._closed:
             raise StopIteration('KafkaConsumer closed')
-        # Now that the heartbeat thread runs in the background
-        # there should be no reason to maintain a separate iterator
-        # but we'll keep it available for a few releases just in case
-        if self.config['legacy_iterator']:
-            return self.next_v1()
-        else:
-            return self.next_v2()
-
-    def next_v2(self):
         self._set_consumer_timeout()
         while time.time() < self._consumer_timeout:
             if not self._iterator:
@@ -1208,17 +1214,6 @@ class KafkaConsumer(six.Iterator):
             except StopIteration:
                 self._iterator = None
         raise StopIteration()
-
-    def next_v1(self):
-        if not self._iterator:
-            self._iterator = self._message_generator()
-
-        self._set_consumer_timeout()
-        try:
-            return next(self._iterator)
-        except StopIteration:
-            self._iterator = None
-            raise
 
     def _set_consumer_timeout(self):
         # consumer_timeout_ms can be used to stop iteration early

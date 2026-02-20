@@ -5,6 +5,8 @@ import abc
 from kafka.protocol.struct import Struct
 from kafka.protocol.types import Int16, Int32, String, Schema, Array, TaggedFields
 
+from kafka.vendor.six import add_metaclass
+
 
 class RequestHeader(Struct):
     SCHEMA = Schema(
@@ -49,9 +51,8 @@ class ResponseHeaderV2(Struct):
     )
 
 
+@add_metaclass(abc.ABCMeta)
 class Request(Struct):
-    __metaclass__ = abc.ABCMeta
-
     FLEXIBLE_VERSION = False
 
     @abc.abstractproperty
@@ -81,19 +82,15 @@ class Request(Struct):
     def to_object(self):
         return _to_object(self.SCHEMA, self)
 
-    def build_request_header(self, correlation_id, client_id):
+    def build_header(self, correlation_id, client_id):
         if self.FLEXIBLE_VERSION:
             return RequestHeaderV2(self, correlation_id=correlation_id, client_id=client_id)
         return RequestHeader(self, correlation_id=correlation_id, client_id=client_id)
 
-    def parse_response_header(self, read_buffer):
-        if self.FLEXIBLE_VERSION:
-            return ResponseHeaderV2.decode(read_buffer)
-        return ResponseHeader.decode(read_buffer)
 
-
+@add_metaclass(abc.ABCMeta)
 class Response(Struct):
-    __metaclass__ = abc.ABCMeta
+    FLEXIBLE_VERSION = False
 
     @abc.abstractproperty
     def API_KEY(self):
@@ -112,6 +109,12 @@ class Response(Struct):
 
     def to_object(self):
         return _to_object(self.SCHEMA, self)
+
+    @classmethod
+    def parse_header(cls, read_buffer):
+        if cls.FLEXIBLE_VERSION:
+            return ResponseHeaderV2.decode(read_buffer)
+        return ResponseHeader.decode(read_buffer)
 
 
 def _to_object(schema, data):
