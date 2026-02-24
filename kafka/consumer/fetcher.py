@@ -69,7 +69,7 @@ class Fetcher(six.Iterator):
         'metric_group_prefix': 'consumer',
         'request_timeout_ms': 30000,
         'retry_backoff_ms': 100,
-        'enable_incremental_fetch_sessions': True,
+        'enable_incremental_fetch_sessions': False,
         'isolation_level': 'read_uncommitted',
     }
 
@@ -82,7 +82,7 @@ class Fetcher(six.Iterator):
             value_deserializer (callable, optional): Any callable that takes a
                 raw message value and returns a deserialized value.
             enable_incremental_fetch_sessions: (bool): Use incremental fetch sessions
-                when available / supported by kafka broker. See KIP-227. Default: True.
+                when available / supported by kafka broker. See KIP-227. Default: False.
             fetch_min_bytes (int): Minimum amount of data the server should
                 return for a fetch request, otherwise wait up to
                 fetch_max_wait_ms for more data to accumulate. Default: 1.
