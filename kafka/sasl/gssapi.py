@@ -2,15 +2,6 @@ from __future__ import absolute_import
 
 import struct
 
-# needed for SASL_GSSAPI authentication:
-try:
-    import gssapi
-    from gssapi.raw.misc import GSSError
-except (ImportError, OSError):
-    #no gssapi available, will disable gssapi mechanism
-    gssapi = None
-    GSSError = None
-
 from kafka.sasl.abc import SaslMechanism
 
 
@@ -23,6 +14,10 @@ class SaslMechanismGSSAPI(SaslMechanism):
     SASL_QOP_AUTH_CONF = 4
 
     def __init__(self, **config):
+        try:
+            import gssapi
+        except (ImportError, OSError):
+            gssapi = None
         assert gssapi is not None, 'GSSAPI lib not available'
         if 'sasl_kerberos_name' not in config and 'sasl_kerberos_service_name' not in config:
             raise ValueError('sasl_kerberos_service_name or sasl_kerberos_name required for GSSAPI sasl configuration')

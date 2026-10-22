@@ -1,9 +1,13 @@
 from __future__ import absolute_import
 
+import sys
+
 try:
     from unittest import mock
 except ImportError:
     import mock
+
+import pytest
 
 from kafka.sasl import get_sasl_mechanism
 import kafka.sasl.gssapi
@@ -23,9 +27,10 @@ def test_gssapi():
         return wrapped
     client_ctx.unwrap.side_effect = mocked_message_wrapper
     client_ctx.wrap.side_effect = mocked_message_wrapper
-    kafka.sasl.gssapi.gssapi = mock.Mock()
-    kafka.sasl.gssapi.gssapi.SecurityContext.return_value = client_ctx
-    gssapi = get_sasl_mechanism('GSSAPI')(**config)
+    gssapi_mock = mock.Mock()
+    gssapi_mock.SecurityContext.return_value = client_ctx
+    with mock.patch.dict(sys.modules, {'gssapi': gssapi_mock}):
+        gssapi = get_sasl_mechanism('GSSAPI')(**config)
     assert isinstance(gssapi, kafka.sasl.gssapi.SaslMechanismGSSAPI)
     client_ctx.step.assert_called_with(None)
 
@@ -40,3 +45,9 @@ def test_gssapi():
 
     assert gssapi.is_done()
     assert gssapi.is_authenticated()
+
+
+def test_gssapi_unavailable():
+    with mock.patch.dict(sys.modules, {'gssapi': None}):
+        with pytest.raises(AssertionError, match='GSSAPI lib not available'):
+            kafka.sasl.gssapi.SaslMechanismGSSAPI(sasl_kerberos_service_name='bar')
