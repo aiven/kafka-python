@@ -7,13 +7,6 @@ import json
 import logging
 import string
 
-# needed for AWS_MSK_IAM authentication:
-try:
-    from botocore.session import Session as BotoSession
-except ImportError:
-    # no botocore available, will disable AWS_MSK_IAM mechanism
-    BotoSession = None
-
 from kafka.errors import KafkaConfigurationError
 from kafka.sasl.abc import SaslMechanism
 from kafka.vendor.six.moves import urllib
@@ -24,7 +17,12 @@ log = logging.getLogger(__name__)
 
 class SaslMechanismAwsMskIam(SaslMechanism):
     def __init__(self, **config):
+        try:
+            from botocore.session import Session as BotoSession
+        except ImportError:
+            BotoSession = None
         assert BotoSession is not None, 'AWS_MSK_IAM requires the "botocore" package'
+        self._boto_session_cls = BotoSession
         assert config.get('security_protocol', '') == 'SASL_SSL', 'AWS_MSK_IAM requires SASL_SSL'
         assert 'host' in config, 'AWS_MSK_IAM requires host configuration'
         self.host = config['host']
@@ -33,7 +31,7 @@ class SaslMechanismAwsMskIam(SaslMechanism):
         self._is_authenticated = False
 
     def _build_client(self):
-        session = BotoSession()
+        session = self._boto_session_cls()
         credentials = session.get_credentials().get_frozen_credentials()
         if not session.get_config_variable('region'):
             raise KafkaConfigurationError('Unable to determine region for AWS MSK cluster. Is AWS_DEFAULT_REGION set?')

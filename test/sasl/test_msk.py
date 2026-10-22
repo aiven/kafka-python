@@ -72,7 +72,7 @@ def test_aws_msk_iam_client_temporary_credentials():
 
 
 def test_aws_msk_iam_sasl_mechanism():
-    with mock.patch('kafka.sasl.msk.BotoSession'):
+    with mock.patch.dict(sys.modules, {'botocore': mock.MagicMock(), 'botocore.session': mock.MagicMock()}):
         sasl = SaslMechanismAwsMskIam(security_protocol='SASL_SSL', host='localhost')
         with mock.patch.object(sasl, '_build_client', return_value=client_factory(token=None)):
             assert sasl.auth_bytes() != b''
